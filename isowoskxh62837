@@ -6,18 +6,18 @@ local CONFIG = {
     ------------------------------------------------------------------ AUTO TAME
     autoTame        = true,    -- true = continuously tame matching wild pets
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
-    hopDelay        = 15,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopDelay        = 13,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
-    emptyHopGrace   = 8,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    emptyHopGrace   = 13,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
-    finderPublicMix = 5,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderPublicMix = 0.3,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
     tameMoveSpeed   = 30,      -- how fast you walk to each pet (16 = normal ... 50 = max)
     tameReturnAfter = true,    -- (no effect while protectWildTame is false)
-    maxPetPrice     = 0,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
+    maxPetPrice     = 20000000,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
     protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
 
     ------------------------------------------------------------------ AUTO SELL PET
@@ -76,16 +76,41 @@ end
 
 do
     local rejoinPlaceId = game.PlaceId
-    local rejoinBusy = false
-    game:GetService("GuiService").ErrorMessageChanged:Connect(function()
-        if not st.autoRejoin or rejoinBusy then return end
-        rejoinBusy = true
+    local reconnecting = false
+    local rejoinFailed = false
+
+    TeleportService.TeleportInitFailed:Connect(function(plr)
+        if plr == LocalPlayer then rejoinFailed = true end
+    end)
+
+    local function reconnect()
+        if not st.autoRejoin or reconnecting then return end
+        reconnecting = true
         notify("Disconnected - rejoining...")
-        for _ = 1, 6 do
-            pcall(function() TeleportService:Teleport(rejoinPlaceId, LocalPlayer) end)
-            task.wait(1.5)
+
+        local q = queue_on_teleport or (syn and syn.queue_on_teleport)
+            or (fluxus and fluxus.queue_on_teleport)
+        if type(q) == "function" then
+            pcall(q, "getgenv().WisHubGaG2TameResume = true")
         end
-        rejoinBusy = false
+
+        for _ = 1, 8 do
+            rejoinFailed = false
+            pcall(function() TeleportService:Teleport(rejoinPlaceId, LocalPlayer) end)
+
+            local t0 = os.clock()
+            while not rejoinFailed and os.clock() - t0 < 12 do
+                task.wait(0.25)
+            end
+            if not rejoinFailed then break end
+            task.wait(2)
+        end
+
+        reconnecting = false
+    end
+
+    game:GetService("GuiService").ErrorMessageChanged:Connect(function()
+        task.spawn(reconnect)
     end)
 end
 
