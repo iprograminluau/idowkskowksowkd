@@ -144,153 +144,111 @@ local function mapFolder(name)
     return m and m:FindFirstChild(name)
 end
 
-local function skipLoadingScreen()
-    local menu = workspace:FindFirstChild("LoadingScreenMenu") or workspace:WaitForChild("LoadingScreenMenu", 20)
-    if not menu then return end
+task.spawn(function()
+    if not st.skipLoading then return end
+    if _G._HH_loadskip_running then return end
+    _G._HH_loadskip_running = true
 
-    local gui     = menu:FindFirstChild("LoadingGui") or menu:WaitForChild("LoadingGui", 15)
-    local inner   = gui and (gui:FindFirstChild("Variant1Frame") or gui:WaitForChild("Variant1Frame", 15))
-    inner = inner and (inner:FindFirstChild("InnerFrame") or inner:WaitForChild("InnerFrame", 15))
-    local counter = inner and inner:FindFirstChild("CounterTxt")
-    local skip    = inner and inner:FindFirstChild("SkipTxt")
+    local CS = game:GetService("CollectionService")
+    local VIM = VirtualInputManager
+    local LP = LocalPlayer
 
-    local function loadingGone()
-        return (not workspace:FindFirstChild("LoadingScreenMenu"))
-            or LocalPlayer:GetAttribute("LoadingScreenDone") == true
+    local gsc
+    local function garden()
+        if gsc then return gsc end
+        pcall(function()
+            local ps = LP:FindFirstChild("PlayerScripts")
+            local m = ps and ps:FindFirstChild("GardenSyncController", true)
+            if m and m:IsA("ModuleScript") then
+                local mod = require(m)
+                if type(mod) == "table" and type(mod.IsLocalGardenLoaded) == "function" then gsc = mod end
+            end
+        end)
+        return gsc
     end
 
-    local function skippableNow()
-        if counter and string.find(counter.Text, "Fully Loaded", 1, true) then return true end
-        if skip and string.find(skip.Text, "Click to skip", 1, true) and skip.TextTransparency < 1 then
-            return true
+    local function ready()
+        if not game:IsLoaded() then return false end
+        if not CS:HasTag(LP, "PersistentLoaded") then return false end
+        if not CS:HasTag(LP, "ControllersStarted") then return false end
+        if not CS:HasTag(LP, "DataLoaded") then return false end
+        local mod = garden()
+        if mod then
+            local ok, loaded = pcall(mod.IsLocalGardenLoaded, mod)
+            if ok then return loaded == true end
+        end
+        local total = LP:GetAttribute("GardenLoadingTotal")
+        if total and total > 0 then
+            return (LP:GetAttribute("GardenLoadingProgress") or 0) >= total
+        end
+        return true
+    end
+
+    local inner
+    local function innerFrame()
+        if inner and inner.Parent then return inner end
+        inner = nil
+        pcall(function()
+            local menu = workspace:FindFirstChild("LoadingScreenMenu")
+            local f = menu and menu:FindFirstChild("InnerFrame", true)
+            if f then inner = f end
+        end)
+        return inner
+    end
+
+    local function fullyLoaded()
+        local f = innerFrame()
+        if not f then return nil end
+        local bar = f:FindFirstChild("ProgressBar")
+        bar = bar and bar:FindFirstChild("Bar")
+        if bar and bar:IsA("GuiObject") and bar.Size.X.Scale >= 0.985 then return true end
+        local counter = f:FindFirstChild("CounterTxt")
+        if counter and counter:IsA("TextLabel") then
+            local t = counter.Text or ""
+            if t:find("Fully Loaded") or t:find("100%") then return true end
         end
         return false
     end
 
-    local function ensureHumanoidCamera()
+    local function sendSkip()
         pcall(function()
+            for _, key in ipairs({ Enum.KeyCode.Space, Enum.KeyCode.Return, Enum.KeyCode.E }) do
+                VIM:SendKeyEvent(true, key, false, game)
+                VIM:SendKeyEvent(false, key, false, game)
+            end
             local cam = workspace.CurrentCamera
-            if cam.CameraType ~= Enum.CameraType.Custom then
-                cam.CameraType = Enum.CameraType.Custom
-            end
-            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-            if hum then cam.CameraSubject = hum end
+            local vp = cam and cam.ViewportSize
+            local cx, cy = 200, 200
+            if vp and vp.X > 4 then cx, cy = math.floor(vp.X / 2), math.floor(vp.Y / 2) end
+            VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
         end)
     end
 
-    local function findFastTeardown()
-        if type(getgc) ~= "function" or type(debug) ~= "table" or type(debug.getupvalues) ~= "function" then
-            return nil
-        end
-        for _, fn in ipairs(getgc(true)) do
-            if type(fn) == "function" then
-                local oks, src = pcall(debug.info, fn, "s")
-                if oks and type(src) == "string" and string.find(src, "Loading") then
-                    local oku, ups = pcall(debug.getupvalues, fn)
-                    if oku and type(ups) == "table" then
-                        local total, nFuncs, hasPlayer, hasMenu = 0, 0, false, false
-                        for _, v in pairs(ups) do
-                            total = total + 1
-                            local tv = typeof(v)
-                            if tv == "function" then nFuncs = nFuncs + 1 end
-                            if tv == "Instance" then
-                                if v == LocalPlayer then hasPlayer = true end
-                                if v.Name == "LoadingScreenMenu" or v.Name == "LoadingGui" then hasMenu = true end
-                            end
-                        end
-                        if total >= 12 and total <= 26 and nFuncs == 1 and hasPlayer and hasMenu then
-                            return fn
-                        end
-                    end
-                end
-            end
-        end
-        return nil
-    end
-
-    local function tryFastTeardown()
-        local fn = findFastTeardown()
-        if not fn then return false end
-        pcall(fn)
-        for _ = 1, 12 do
-            if loadingGone() then return true end
-            task.wait(0.05)
-        end
-        return loadingGone()
-    end
-
-    local function tryFireSkip()
-        if type(getconnections) ~= "function" then return false end
-        local matched, fallback = {}, {}
-        for _, c in ipairs(getconnections(UserInputService.InputBegan)) do
-            local f = c.Function
-            if f and type(c.Fire) == "function" then
-                local oks, src = pcall(debug.info, f, "s")
-                if oks and type(src) == "string" and string.find(src, "LoadingScreen") then
-                    matched[#matched + 1] = c
-                elseif type(debug) == "table" and type(debug.getupvalues) == "function" then
-                    local oku, ups = pcall(debug.getupvalues, f)
-                    if oku and type(ups) == "table" then
-                        local total, allBool = 0, true
-                        for _, v in pairs(ups) do
-                            total = total + 1
-                            if type(v) ~= "boolean" then allBool = false end
-                        end
-                        if total == 2 and allBool then fallback[#fallback + 1] = c end
-                    end
-                end
-            end
-        end
-        local list = (#matched > 0) and matched or fallback
-        for _, c in ipairs(list) do pcall(function() c:Fire() end) end
-        return #list > 0
-    end
-
-    local function vimSkip()
-        pcall(function()
-            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-            task.wait(0.03)
-            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-        end)
-        pcall(function()
-            local vp = workspace.CurrentCamera.ViewportSize
-            VirtualInputManager:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 0)
-            task.wait(0.03)
-            VirtualInputManager:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 0)
-        end)
-    end
-
-    local function mark(via) _G.__WISHUB_SKIP = via end
-
-    local w = 0
-    while not loadingGone()
-        and (not game:IsLoaded()
-            or not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")))
-        and w < 60 do
-        task.wait(0.2); w = w + 0.2
-    end
-    if loadingGone() then mark("0:already-gone"); ensureHumanoidCamera(); return end
-
-    local lastMethod = nil
-    local tries = 0
-    while not loadingGone() and tries < 80 do
-        if tryFastTeardown() then
-            lastMethod = "1:fastTeardown"
-        elseif skippableNow() and tryFireSkip() then
-            lastMethod = "2:fireListener"
-        else
-            vimSkip()
-            lastMethod = "3:vim"
-        end
-        tries = tries + 1
+    local t0 = os.clock()
+    while not LP:GetAttribute("LoadingScreenActive") do
+        if LP:GetAttribute("LoadingScreenDone") or os.clock() - t0 > 10 then return end
         task.wait(0.2)
     end
 
-    mark(lastMethod or "none")
-    ensureHumanoidCamera()
-end
+    local tActive = os.clock()
+    local function waitDone(sec)
+        local w = os.clock()
+        while not LP:GetAttribute("LoadingScreenDone") and os.clock() - w < sec do task.wait(0.1) end
+    end
 
-if st.skipLoading then task.spawn(skipLoadingScreen) end
+    while not LP:GetAttribute("LoadingScreenDone") and os.clock() - tActive < 120 do
+        if LP:GetAttribute("LoadingScreenActive") then
+            local fl = fullyLoaded()
+            if fl == true then
+                sendSkip(); waitDone(1.5)
+            elseif fl == nil and ready() and os.clock() - tActive >= 8 then
+                sendSkip(); waitDone(1.5)
+            end
+        end
+        task.wait(0.3)
+    end
+end)
 
 local function petKey(name)
     return tostring(name):match("([%x%-]+)$") or tostring(name)
