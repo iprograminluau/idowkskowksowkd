@@ -1,0 +1,1384 @@
+if _G.__WISHUB_GAG2_AUTOTAME then return end
+_G.__WISHUB_GAG2_AUTOTAME = true
+
+local CONFIG = {
+    ------------------------------------------------------------------ AUTO TAME
+    ------------------------------------------------------------------ AUTO TAME
+    autoTame        = true,    -- true = continuously tame matching wild pets
+    autoHop         = true,   -- true = clear this server, then hop to a new one for more
+    hopDelay        = 13,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
+    emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
+    finderPublicMix = 0.3,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
+    finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
+    tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
+    tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
+    tameMoveSpeed   = 8,      -- how fast you walk to each pet (16 = normal ... 50 = max)
+    tameReturnAfter = true,    -- (no effect while protectWildTame is false)
+    maxPetPrice     = 0,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
+    protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
+
+    ------------------------------------------------------------------ AUTO SELL PET
+    autoSellPet             = true,   -- true = auto-sell the pets below from your bag
+    selectedSellPetName     = {},      -- pet names to sell, e.g. {"Bunny","Dog"}
+    selectedSellPetRarity   = { "Common", "Uncommon", "Rare", "Epic", "Legendary" },  -- sell these; Mythic + Super are kept
+    sellPetBlacklistVariant = { "Big", "Huge", "Rainbow", "Mega" },  -- NEVER sell these variants
+    sellPetDelay            = 0.5,     -- seconds between each sale (min 0.2)
+
+    ------------------------------------------------------------------ AUTO COLLECT
+    autoSellFruit     = true,    -- auto-sell ALL your fruit (Steven's "Sell All")
+    sellFruitDelay    = 10,      -- seconds between fruit-sell checks (min 5)
+    autoClaimMailbox  = true,    -- auto-claim all your mailbox rewards
+    claimMailboxDelay = 10,      -- seconds between mailbox claims (min 10)
+
+    ------------------------------------------------------------------ MISC
+    antiFling   = true,    -- cancel fling/knockback velocity each frame (collision stays ON, unlike noclip)
+    autoRejoin  = true,    -- rejoin a fresh server if Roblox disconnects/kicks you (Error 279, garden-load kick, etc.)
+    charLoadTimeout = 10,  -- avatar never appears (no char/analog stick)? rejoin after this many seconds (0 = off)
+    rejoinOnError   = 3,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
+    skipLoading = true,    -- auto-skip the loading screen once it is fully loaded
+    fpsBoost    = true,    -- strip the world for max FPS (everything returns on rejoin)
+
+    ------------------------------------------------------------------ DISCORD WEBHOOK
+    webhook     = true,    -- send a Discord report each server (before every hop) + on errors
+    webhookUrl  = "https://discord.com/api/webhooks/1531310248084766751/YzvolVDSmQ_SRtRdnZeBLR8iSl-nPzgWAI0d08WGqBnVvtfvXsffaKk-KhZ7qMrBGT4m",
+}
+
+
+local st = CONFIG
+st.autoSellPetLoopId = 0
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Lighting = game:GetService("Lighting")
+local LocalPlayer = Players.LocalPlayer
+pcall(function() math.randomseed(os.clock() * 1e6 + (LocalPlayer.UserId % 1000000)) end)
+local Networking = require(RS.SharedModules.Networking)
+local Sheckles = LocalPlayer:WaitForChild("leaderstats", 30):WaitForChild("Sheckles", 30)
+
+local PetData = require(RS.SharedData.PetData)
+local okPT, PetTypes = pcall(require, RS.SharedData.PetTypes)
+if not okPT then PetTypes = nil end
+local okPS, PetSizes = pcall(require, RS.SharedData.PetSizes)
+if not okPS then PetSizes = nil end
+local okPSC, PlayerStateClient = pcall(require, RS.ClientModules.PlayerStateClient)
+if not okPSC then PlayerStateClient = nil end
+
+local function notify(msg)
+    print("[AutoTame] " .. msg)
+end
+
+do
+    local rejoinPlaceId = game.PlaceId
+    local rejoinBusy = false
+    game:GetService("GuiService").ErrorMessageChanged:Connect(function()
+        if not st.autoRejoin or rejoinBusy then return end
+        rejoinBusy = true
+        notify("Disconnected - rejoining...")
+        for _ = 1, 6 do
+            pcall(function() TeleportService:Teleport(rejoinPlaceId, LocalPlayer) end)
+            task.wait(1.5)
+        end
+        rejoinBusy = false
+    end)
+end
+
+RunService.Stepped:Connect(function()
+    if not st.antiFling then return end
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+    root.AssemblyLinearVelocity = Vector3.zero
+    root.AssemblyAngularVelocity = Vector3.zero
+end)
+
+local function hrp()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+do
+    local function inGameplayPhase()
+        if LocalPlayer:GetAttribute("LoadingScreenDone") ~= true then return false end
+        if LocalPlayer:GetAttribute("OfflineCutscenePlaying") == true then return false end
+        if LocalPlayer:GetAttribute("CutsceneInputBlocked") == true then return false end
+        if workspace:FindFirstChild("LoadingScreenMenu") then return false end
+        return true
+    end
+
+    task.spawn(function()
+        local missingSince = nil
+        local busy = false
+        while true do
+            task.wait(0.5)
+            local timeout = tonumber(st.charLoadTimeout) or 0
+            if timeout <= 0 or busy or hrp() then
+                missingSince = nil
+            else
+                missingSince = missingSince or os.clock()
+                local waited = os.clock() - missingSince
+                local limit = inGameplayPhase() and timeout or math.max(timeout, 45)
+                if waited >= limit then
+                    busy = true
+                    notify(("No character for %ds -- rejoining..."):format(math.floor(waited)))
+                    for _ = 1, 6 do
+                        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+                        task.wait(1.5)
+                    end
+                    busy = false
+                    missingSince = nil
+                end
+            end
+        end
+    end)
+end
+
+local function mapFolder(name)
+    local m = workspace:FindFirstChild("Map")
+    return m and m:FindFirstChild(name)
+end
+
+local function skipLoadingScreen()
+    local menu = workspace:FindFirstChild("LoadingScreenMenu") or workspace:WaitForChild("LoadingScreenMenu", 20)
+    if not menu then return end
+
+    local gui     = menu:FindFirstChild("LoadingGui") or menu:WaitForChild("LoadingGui", 15)
+    local inner   = gui and (gui:FindFirstChild("Variant1Frame") or gui:WaitForChild("Variant1Frame", 15))
+    inner = inner and (inner:FindFirstChild("InnerFrame") or inner:WaitForChild("InnerFrame", 15))
+    local counter = inner and inner:FindFirstChild("CounterTxt")
+    local skip    = inner and inner:FindFirstChild("SkipTxt")
+
+    local function loadingGone()
+        return (not workspace:FindFirstChild("LoadingScreenMenu"))
+            or LocalPlayer:GetAttribute("LoadingScreenDone") == true
+    end
+
+    local function skippableNow()
+        if counter and string.find(counter.Text, "Fully Loaded", 1, true) then return true end
+        if skip and string.find(skip.Text, "Click to skip", 1, true) and skip.TextTransparency < 1 then
+            return true
+        end
+        return false
+    end
+
+    local function ensureHumanoidCamera()
+        pcall(function()
+            local cam = workspace.CurrentCamera
+            if cam.CameraType ~= Enum.CameraType.Custom then
+                cam.CameraType = Enum.CameraType.Custom
+            end
+            local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then cam.CameraSubject = hum end
+        end)
+    end
+
+    local function findFastTeardown()
+        if type(getgc) ~= "function" or type(debug) ~= "table" or type(debug.getupvalues) ~= "function" then
+            return nil
+        end
+        for _, fn in ipairs(getgc(true)) do
+            if type(fn) == "function" then
+                local oks, src = pcall(debug.info, fn, "s")
+                if oks and type(src) == "string" and string.find(src, "Loading") then
+                    local oku, ups = pcall(debug.getupvalues, fn)
+                    if oku and type(ups) == "table" then
+                        local total, nFuncs, hasPlayer, hasMenu = 0, 0, false, false
+                        for _, v in pairs(ups) do
+                            total = total + 1
+                            local tv = typeof(v)
+                            if tv == "function" then nFuncs = nFuncs + 1 end
+                            if tv == "Instance" then
+                                if v == LocalPlayer then hasPlayer = true end
+                                if v.Name == "LoadingScreenMenu" or v.Name == "LoadingGui" then hasMenu = true end
+                            end
+                        end
+                        if total >= 12 and total <= 26 and nFuncs == 1 and hasPlayer and hasMenu then
+                            return fn
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function tryFastTeardown()
+        local fn = findFastTeardown()
+        if not fn then return false end
+        pcall(fn)
+        for _ = 1, 12 do
+            if loadingGone() then return true end
+            task.wait(0.05)
+        end
+        return loadingGone()
+    end
+
+    local function tryFireSkip()
+        if type(getconnections) ~= "function" then return false end
+        local matched, fallback = {}, {}
+        for _, c in ipairs(getconnections(UserInputService.InputBegan)) do
+            local f = c.Function
+            if f and type(c.Fire) == "function" then
+                local oks, src = pcall(debug.info, f, "s")
+                if oks and type(src) == "string" and string.find(src, "LoadingScreen") then
+                    matched[#matched + 1] = c
+                elseif type(debug) == "table" and type(debug.getupvalues) == "function" then
+                    local oku, ups = pcall(debug.getupvalues, f)
+                    if oku and type(ups) == "table" then
+                        local total, allBool = 0, true
+                        for _, v in pairs(ups) do
+                            total = total + 1
+                            if type(v) ~= "boolean" then allBool = false end
+                        end
+                        if total == 2 and allBool then fallback[#fallback + 1] = c end
+                    end
+                end
+            end
+        end
+        local list = (#matched > 0) and matched or fallback
+        for _, c in ipairs(list) do pcall(function() c:Fire() end) end
+        return #list > 0
+    end
+
+    local function vimSkip()
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+            task.wait(0.03)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+        end)
+        pcall(function()
+            local vp = workspace.CurrentCamera.ViewportSize
+            VirtualInputManager:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, true, game, 0)
+            task.wait(0.03)
+            VirtualInputManager:SendMouseButtonEvent(vp.X / 2, vp.Y / 2, 0, false, game, 0)
+        end)
+    end
+
+    local function mark(via) _G.__WISHUB_SKIP = via end
+
+    local w = 0
+    while not loadingGone()
+        and (not game:IsLoaded()
+            or not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")))
+        and w < 60 do
+        task.wait(0.2); w = w + 0.2
+    end
+    if loadingGone() then mark("0:already-gone"); ensureHumanoidCamera(); return end
+
+    local lastMethod = nil
+    local tries = 0
+    while not loadingGone() and tries < 80 do
+        if tryFastTeardown() then
+            lastMethod = "1:fastTeardown"
+        elseif skippableNow() and tryFireSkip() then
+            lastMethod = "2:fireListener"
+        else
+            vimSkip()
+            lastMethod = "3:vim"
+        end
+        tries = tries + 1
+        task.wait(0.2)
+    end
+
+    mark(lastMethod or "none")
+    ensureHumanoidCamera()
+end
+
+if st.skipLoading then task.spawn(skipLoadingScreen) end
+
+local function petKey(name)
+    return tostring(name):match("([%x%-]+)$") or tostring(name)
+end
+
+local lastTameSuccessAt = 0
+local tameResultAt = {}
+local pendingTameKey = nil
+local pendingTameAt = 0
+
+local sessionTamed = 0
+local sessionPets = {}
+local petMeta = {}
+
+local httpRequest = (syn and syn.request) or (fluxus and fluxus.request)
+    or (http and http.request) or http_request or request
+
+local function sendWebhook(payload)
+    if not st.webhook then return end
+    local url = tostring(st.webhookUrl or "")
+    if url == "" or type(httpRequest) ~= "function" then return end
+    local body
+    if not pcall(function() body = HttpService:JSONEncode(payload) end) then return end
+    pcall(function()
+        httpRequest({
+            Url = url,
+            Method = "POST",
+            Headers = { ["Content-Type"] = "application/json" },
+            Body = body,
+        })
+    end)
+end
+
+local function playerTag()
+    return LocalPlayer.Name .. " (" .. tostring(LocalPlayer.UserId) .. ")"
+end
+
+local function reportDone()
+    if not st.webhook then return end
+    local pets = (#sessionPets > 0) and table.concat(sessionPets, ", ") or "none"
+    sendWebhook({
+        embeds = { {
+            title = "GaG2 Auto Tame - Server done",
+            color = 3066993,
+            fields = {
+                { name = "Player", value = playerTag(), inline = true },
+                { name = "Tamed this server", value = tostring(sessionTamed), inline = true },
+                { name = "Pets", value = string.sub(pets, 1, 1000) },
+                { name = "Next", value = "Hopping to a new server" },
+            },
+            footer = { text = "WisHUB GaG2 | JobId " .. tostring(game.JobId) },
+        } },
+    })
+end
+
+local lastErrAt, lastErrMsg = 0, nil
+local function reportError(msg)
+    if not st.webhook then return end
+    msg = tostring(msg or "unknown error")
+    local now = os.clock()
+    if msg == lastErrMsg and now - lastErrAt < 30 then return end
+    lastErrAt, lastErrMsg = now, msg
+    sendWebhook({
+        embeds = { {
+            title = "GaG2 Auto Tame - Error",
+            color = 15158332,
+            description = string.sub(msg, 1, 1800),
+            fields = {
+                { name = "Player", value = playerTag(), inline = true },
+                { name = "Tamed before error", value = tostring(sessionTamed), inline = true },
+            },
+            footer = { text = "WisHUB GaG2 | JobId " .. tostring(game.JobId) },
+        } },
+    })
+end
+
+Networking.Pets.WildPetTameResult.OnClientEvent:Connect(function(petPart, who)
+    if who == LocalPlayer.UserId then
+        lastTameSuccessAt = os.clock()
+        if typeof(petPart) == "Instance" then
+            local k = petKey(petPart.Name)
+            tameResultAt[k] = os.clock()
+            if pendingTameKey == k then pendingTameKey = nil end
+            sessionTamed = sessionTamed + 1
+            local meta = petMeta[k]
+            local label = (meta and meta.name) and tostring(meta.name) or "Pet"
+            if meta and meta.rarity then label = label .. " (" .. tostring(meta.rarity) .. ")" end
+            sessionPets[#sessionPets + 1] = label
+            petMeta[k] = nil
+        end
+    end
+end)
+
+local function tamedThis(ref, start)
+    local at = ref and tameResultAt[petKey(ref.Name)]
+    return at ~= nil and at > start
+end
+
+local function markTameFired(ref)
+    pendingTameKey = petKey(ref.Name)
+    pendingTameAt = os.clock()
+    if ref then
+        petMeta[petKey(ref.Name)] = {
+            name = ref:GetAttribute("PetName"),
+            rarity = ref:GetAttribute("Rarity"),
+        }
+    end
+end
+
+local function clearTamePending(ref)
+    if pendingTameKey == petKey(ref.Name) then pendingTameKey = nil end
+end
+
+local firedPrompts = {}
+
+local function promptPresent(p)
+    return p ~= nil and p.Parent ~= nil and p:IsDescendantOf(workspace)
+end
+
+local function trackFiredPrompt(p)
+    for pp in pairs(firedPrompts) do
+        if not promptPresent(pp) then firedPrompts[pp] = nil end
+    end
+    if p then firedPrompts[p] = true end
+end
+
+local function untrackFiredPrompt(p)
+    if p then firedPrompts[p] = nil end
+end
+
+local function firedPromptsRemaining()
+    local n = 0
+    for pp in pairs(firedPrompts) do
+        if promptPresent(pp) then n = n + 1 else firedPrompts[pp] = nil end
+    end
+    return n
+end
+
+local cooldown = {}
+
+local function matchesWhitelist(rarity, name)
+    local rOK = (#st.tameRarities == 0) or (table.find(st.tameRarities, rarity) ~= nil)
+    local nOK = (#st.tameNames == 0) or (table.find(st.tameNames, name) ~= nil)
+    return rOK and nOK
+end
+
+local function refFor(visual)
+    local rf = mapFolder("WildPetRef")
+    if not rf then return nil end
+    local refName = visual.Name:match("(WildPet_[%x%-]+)$")
+    return refName and rf:FindFirstChild(refName) or nil
+end
+
+local function refCFrame(ref)
+    if ref:IsA("BasePart") then return ref.CFrame end
+    local p = ref.PrimaryPart or ref:FindFirstChildWhichIsA("BasePart")
+    if p then return p.CFrame end
+    if ref:IsA("Model") then return ref:GetPivot() end
+    return nil
+end
+
+local PROTECT_RADIUS = 20
+local shovelHitCd = {}
+
+local function findShovel()
+    for _, cont in ipairs({ LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character }) do
+        if cont then
+            for _, t in ipairs(cont:GetChildren()) do
+                if t:IsA("Tool") and (t:GetAttribute("Shovel") ~= nil or t.Name == "Shovel") then return t end
+            end
+        end
+    end
+    return nil
+end
+
+local function equipShovel()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+    local sh = findShovel()
+    if sh and sh.Parent ~= char then pcall(function() hum:EquipTool(sh) end) end
+end
+
+local function protectAura()
+    local root = hrp()
+    if not root then return end
+    local now = os.clock()
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl ~= LocalPlayer and pl.Character then
+            local tr = pl.Character:FindFirstChild("HumanoidRootPart")
+            if tr and (tr.Position - root.Position).Magnitude <= PROTECT_RADIUS then
+                if not shovelHitCd[pl] or now - shovelHitCd[pl] > 0.5 then
+                    shovelHitCd[pl] = now
+                    pcall(function() Networking.Shovel.HitPlayer:Fire(pl.UserId) end)
+                end
+            end
+        end
+    end
+end
+
+local function tamePet(visual, ref, fromAuto)
+    local rp = visual:FindFirstChild("RootPart")
+    local prompt = rp and rp:FindFirstChild("BuyPrompt")
+    local root = hrp()
+    if not (rp and prompt and root) then return false end
+    local returnCF = root.CFrame
+    if st.protectWildTame then equipShovel() end
+    local start = os.clock()
+    local lastFire = 0
+    local lastT = os.clock()
+    local lastAura = 0
+    local ok = false
+    while os.clock() - start < (st.protectWildTame and 30 or 15) do
+        if fromAuto and not st.autoTame then break end
+        local petGone = not (visual.Parent and ref.Parent)
+        if st.protectWildTame then
+            if petGone then
+                ok = true
+                break
+            end
+            if os.clock() - lastAura > 0.3 then
+                lastAura = os.clock()
+                equipShovel()
+                protectAura()
+            end
+        else
+            if tamedThis(ref, start) then
+                ok = true
+                break
+            end
+            if petGone then
+                local g = os.clock()
+                while os.clock() - g < 3 do
+                    if tamedThis(ref, start) then
+                        ok = true
+                        break
+                    end
+                    task.wait(0.1)
+                end
+                break
+            end
+            local owner = tonumber(ref:GetAttribute("OwnerUserId")) or 0
+            if owner ~= 0 and owner ~= LocalPlayer.UserId then break end
+            local cap = tonumber(st.maxPetPrice) or 0
+            if cap > 0 and (tonumber(ref:GetAttribute("Price")) or 0) > cap then break end
+        end
+        local now = os.clock()
+        local dt = math.min(now - lastT, 0.1)
+        lastT = now
+        local goal = (refCFrame(ref) or rp.CFrame).Position
+        local cur = root.Position
+        local to = goal - cur
+        local dist = to.Magnitude
+        if st.protectWildTame then
+            if dist > 4 then
+                local step = math.min(60 * dt, dist - 3)
+                local newPos = cur + to.Unit * step
+                root.CFrame = CFrame.lookAt(newPos, Vector3.new(goal.X, newPos.Y, goal.Z))
+            else
+                root.CFrame = CFrame.lookAt(cur, Vector3.new(goal.X, cur.Y, goal.Z))
+            end
+            pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+        else
+            local speed = math.clamp(tonumber(st.tameMoveSpeed) or 16, 4, 50)
+            if dist > 5 then
+                local step = math.min(speed * dt, dist - 4)
+                local nextPos = cur + to.Unit * step
+                root.CFrame = CFrame.lookAt(nextPos, Vector3.new(goal.X, nextPos.Y, goal.Z))
+                pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+            end
+        end
+        if dist <= 12 and now - lastFire > 0.4 then
+            markTameFired(ref)
+            trackFiredPrompt(prompt)
+            if type(fireproximityprompt) == "function" then
+                pcall(function() fireproximityprompt(prompt) end)
+            else
+                pcall(function() Networking.Pets.WildPetTame:Fire(ref) end)
+            end
+            lastFire = now
+        end
+        RunService.Heartbeat:Wait()
+    end
+    clearTamePending(ref)
+    if not ok then untrackFiredPrompt(prompt) end
+    if st.tameReturnAfter then pcall(function() root.CFrame = returnCF end) end
+    return ok
+end
+
+local function pickTarget()
+    local spawns = mapFolder("WildPetSpawns")
+    local root = hrp()
+    if not (spawns and root) then return nil end
+    local best, bestRef, bestDist
+    local now = os.clock()
+    for _, visual in ipairs(spawns:GetChildren()) do
+        local rp = visual:FindFirstChild("RootPart")
+        local ref = refFor(visual)
+        local cd = cooldown[visual]
+        if rp and typeof(ref) == "Instance" and (not cd or cd < now) and tonumber(ref:GetAttribute("OwnerUserId")) == 0 then
+            local rarity = tostring(ref:GetAttribute("Rarity"))
+            local pname = tostring(ref:GetAttribute("PetName"))
+            local price = tonumber(ref:GetAttribute("Price")) or 0
+            local cap = tonumber(st.maxPetPrice) or 0
+            if matchesWhitelist(rarity, pname) and Sheckles.Value >= price and (cap <= 0 or price <= cap) then
+                local d = (rp.Position - root.Position).Magnitude
+                if not bestDist or d < bestDist then best, bestRef, bestDist = visual, ref, d end
+            end
+        end
+    end
+    return best, bestRef
+end
+
+local function fastTame(visual, ref)
+    local rp = visual:FindFirstChild("RootPart")
+    local prompt = rp and rp:FindFirstChild("BuyPrompt")
+    local root = hrp()
+    if not (rp and prompt and root) then return false end
+    local start = os.clock()
+    local lastT = os.clock()
+    local settledAt = nil
+    local firedOnce = false
+    local lastFire = 0
+    local ok = false
+    while true do
+        if not st.autoTame then break end
+        if tamedThis(ref, start) then ok = true break end
+        local petGone = not (visual.Parent and ref.Parent)
+        if petGone then
+            if firedOnce then
+                local g = os.clock()
+                while os.clock() - g < 1.5 do
+                    if tamedThis(ref, start) then break end
+                    task.wait(0.1)
+                end
+                ok = true
+            end
+            break
+        end
+        local owner = tonumber(ref:GetAttribute("OwnerUserId")) or 0
+        if owner ~= 0 and owner ~= LocalPlayer.UserId then break end
+        local cap = tonumber(st.maxPetPrice) or 0
+        if cap > 0 and (tonumber(ref:GetAttribute("Price")) or 0) > cap then break end
+        if not firedOnce and os.clock() - start > 8 then break end
+        if firedOnce and os.clock() - start > 20 then break end
+        local now = os.clock()
+        local dt = math.min(now - lastT, 0.1)
+        lastT = now
+        local goal = (refCFrame(ref) or rp.CFrame).Position
+        local cur = root.Position
+        local to = goal - cur
+        local dist = to.Magnitude
+        local speed = math.clamp(tonumber(st.tameMoveSpeed) or 16, 4, 50)
+        if dist > 6 then
+            settledAt = nil
+            local step = math.min(speed * dt, dist - 5)
+            local nextPos = cur + to.Unit * step
+            root.CFrame = CFrame.lookAt(nextPos, Vector3.new(goal.X, nextPos.Y, goal.Z))
+            pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+        else
+            root.CFrame = CFrame.lookAt(cur, Vector3.new(goal.X, cur.Y, goal.Z))
+            pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+            settledAt = settledAt or now
+            if now - settledAt > 0.6 and now - lastFire > 0.4 then
+                lastFire = now
+                firedOnce = true
+                markTameFired(ref)
+                trackFiredPrompt(prompt)
+                if type(fireproximityprompt) == "function" then
+                    pcall(function() fireproximityprompt(prompt) end)
+                else
+                    pcall(function() Networking.Pets.WildPetTame:Fire(ref) end)
+                end
+            end
+        end
+        RunService.Heartbeat:Wait()
+    end
+    clearTamePending(ref)
+    if not ok then untrackFiredPrompt(prompt) end
+    return ok
+end
+
+local function doTameStep(target, ref)
+    if st.protectWildTame then
+        local name = tostring(ref:GetAttribute("PetName"))
+        local price = tonumber(ref:GetAttribute("Price")) or 0
+        if tamePet(target, ref, true) then
+            notify(("Tamed %s (-%s)"):format(name, tostring(price)))
+        else
+            cooldown[target] = os.clock() + 12
+        end
+    else
+        fastTame(target, ref)
+        cooldown[target] = os.clock() + 2
+    end
+end
+
+local function getHumanoid()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getInventoryPetEntry(petId)
+    if petId == nil or not PlayerStateClient then return nil end
+    petId = tostring(petId)
+    local ok, pets = pcall(function()
+        local rep = PlayerStateClient:GetLocalReplica()
+        return rep and rep.Data and rep.Data.Inventory and rep.Data.Inventory.Pets
+    end)
+    if not ok or type(pets) ~= "table" then return nil end
+    local direct = pets[petId]
+    if type(direct) == "table" then return direct end
+    for _, entry in pairs(pets) do
+        if type(entry) == "table" and tostring(entry.Id) == petId then return entry end
+    end
+    return nil
+end
+
+local function getSellPetVariants(tool, entry)
+    local variants = {}
+    local candidates = {}
+    local function add(v)
+        if type(v) == "string" and v ~= "" then candidates[#candidates + 1] = v end
+    end
+    if tool and typeof(tool) == "Instance" then
+        add(tool:GetAttribute("PetSize"))
+        add(tool:GetAttribute("PetType"))
+    end
+    if type(entry) == "table" then
+        add(entry.Size)
+        add(entry.PetSize)
+        add(entry.Type)
+        add(entry.PetType)
+    end
+    for _, v in ipairs(candidates) do
+        variants[v] = true
+        if PetSizes and type(PetSizes.Normalize) == "function" then
+            local okN, norm = pcall(PetSizes.Normalize, v)
+            if okN and type(norm) == "string" and norm ~= "" then variants[norm] = true end
+        end
+    end
+    if PetTypes and type(PetTypes.IsRainbow) == "function" then
+        local okR, isRb = pcall(PetTypes.IsRainbow, entry or tool)
+        if okR and isRb then variants.Rainbow = true end
+    end
+    return variants
+end
+
+local function sellPetBlacklisted(tool, entry)
+    local list = st.sellPetBlacklistVariant
+    if type(list) ~= "table" then return true end
+    if #list == 0 then return false end
+    local variants = getSellPetVariants(tool, entry)
+    for _, wanted in ipairs(list) do
+        wanted = tostring(wanted or "")
+        if wanted ~= "" then
+            for variant in pairs(variants) do
+                if variant == wanted or variant:find(wanted, 1, true) then return true end
+            end
+        end
+    end
+    return false
+end
+
+local function isSellablePetTool(tool)
+    return tool and tool:IsA("Tool")
+        and tool:GetAttribute("Pet") ~= nil
+        and tool:GetAttribute("PetId") ~= nil
+end
+
+local function getSellPetTargets()
+    local targets = {}
+    local byName = st.selectedSellPetName or {}
+    local byRarity = st.selectedSellPetRarity or {}
+    if #byName == 0 and #byRarity == 0 then return targets end
+    for _, cont in ipairs({ LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character }) do
+        if cont then
+            for _, tool in ipairs(cont:GetChildren()) do
+                if isSellablePetTool(tool) then
+                    local petName = tostring(tool:GetAttribute("Pet"))
+                    local data = PetData[petName]
+                    local rarity = data and data.Rarity
+                    local nameMatch = #byName > 0 and table.find(byName, petName)
+                    local rarityMatch = #byRarity > 0 and rarity and table.find(byRarity, rarity)
+                    if nameMatch or rarityMatch then
+                        local entry = getInventoryPetEntry(tool:GetAttribute("PetId"))
+                        if entry and not sellPetBlacklisted(tool, entry) then
+                            targets[#targets + 1] = tool
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return targets
+end
+
+local function sellOnePet(tool)
+    local hum = getHumanoid()
+    if not hum or not tool or not tool.Parent then return false end
+    local entry = getInventoryPetEntry(tool:GetAttribute("PetId"))
+    if not entry or sellPetBlacklisted(tool, entry) then return false end
+    if tool.Parent ~= LocalPlayer.Character then
+        hum:EquipTool(tool)
+        local t0 = os.clock()
+        while tool.Parent ~= LocalPlayer.Character and os.clock() - t0 < 1 do task.wait(0.05) end
+    end
+    if tool.Parent ~= LocalPlayer.Character then return false end
+    local petId = tool:GetAttribute("PetId")
+    local npcs = Networking.NPCS
+    if not (npcs and npcs.SellPet and petId) then return false end
+    local ok, result = pcall(function() return npcs.SellPet:Fire(tostring(petId)) end)
+    if not ok then return false end
+    if type(result) == "table" and result.Success == false then return false end
+    return true
+end
+
+_G.WisHubSellPetSession = (_G.WisHubSellPetSession or 0) + 1
+local sellPetSession = _G.WisHubSellPetSession
+local function startSellLoop()
+    st.autoSellPetLoopId = (st.autoSellPetLoopId or 0) + 1
+    if not st.autoSellPet then return end
+    local loopId = st.autoSellPetLoopId
+    task.spawn(function()
+        while st.autoSellPet
+            and st.autoSellPetLoopId == loopId
+            and _G.WisHubSellPetSession == sellPetSession do
+            for _, tool in ipairs(getSellPetTargets()) do
+                if not st.autoSellPet
+                    or st.autoSellPetLoopId ~= loopId
+                    or _G.WisHubSellPetSession ~= sellPetSession then
+                    return
+                end
+                sellOnePet(tool)
+                task.wait(math.max(0.2, tonumber(st.sellPetDelay) or 0.5))
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+local teleportFailed = false
+local teleportFailResult = nil
+TeleportService.TeleportInitFailed:Connect(function(player, result)
+    if player == LocalPlayer then
+        teleportFailed = true
+        teleportFailResult = result
+    end
+end)
+
+local function dismissTeleportError()
+    pcall(function()
+        local rg = game:GetService("CoreGui"):FindFirstChild("RobloxGui")
+        local prompt = rg and rg:FindFirstChild("ErrorPrompt")
+        if prompt then prompt.Visible = false end
+    end)
+end
+
+local PetRarityByName = {
+    Bunny = "Common", Frog = "Common",
+    Owl = "Uncommon",
+    Deer = "Rare",
+    Bee = "Legendary", Robin = "Legendary", Dragonfly = "Legendary", Wolf = "Legendary",
+    Fox = "Mythic", Turkey = "Mythic", Squirrel = "Mythic", Bear = "Mythic",
+    GoldenDragonfly = "Mythic", Monkey = "Mythic", Unicorn = "Mythic", Dog = "Mythic",
+    ShadowDragon = "Super", Swan = "Super", BlackDragon = "Super", IceSerpent = "Super", Raccoon = "Super",
+}
+local FINDER_BASE = "https://gag2petfinder.wishub.cloud/api/wq7x2k9p"
+local FINDER_MIN_REMAINING = 20
+local finderFailedJobs = {}
+
+local function finderRequestFn()
+    return (WIS_Request and WIS_Request.request) or (syn and syn.request)
+        or (fluxus and fluxus.request) or (http and http.request) or http_request or request
+end
+
+local function finderPetNames()
+    local want = st.finderRarities
+    local restrict = type(want) == "table" and #want > 0
+    local names = {}
+    for name, rarity in pairs(PetRarityByName) do
+        if not restrict or table.find(want, rarity) then
+            names[#names + 1] = name
+        end
+    end
+    return names
+end
+
+local function finderFetch()
+    if not st.useFinder then return nil end
+    local req = finderRequestFn()
+    if type(req) ~= "function" then return nil end
+    local names = finderPetNames()
+    if #names == 0 then return nil end
+    local url = FINDER_BASE .. "?pet_name=" .. table.concat(names, ",")
+    local resp
+    local ok = pcall(function()
+        resp = req({
+            Url = url,
+            Method = "GET",
+            Headers = {
+                ["Authorization"] = "Bearer " .. tostring(st.finderToken or ""),
+                ["Cache-Control"] = "no-store",
+            },
+        })
+    end)
+    if not ok or not resp then return nil end
+    local body = resp.Body or resp.body
+    if type(body) ~= "string" then return nil end
+    local decoded
+    if not pcall(function() decoded = HttpService:JSONDecode(body) end) then return nil end
+    return type(decoded) == "table" and decoded or nil
+end
+
+local function finderPickJobId()
+    local pets = finderFetch()
+    if not pets then return nil end
+    local cur = tostring(game.JobId)
+    local now = os.time()
+    local clock = os.clock()
+    local best = {}
+    for _, p in ipairs(pets) do
+        local job = tostring(p.job_id or "")
+        local remain = (tonumber(p.expires_at) and (p.expires_at - now)) or tonumber(p.remaining) or 0
+        local players = tonumber(p.players) or 0
+        local maxp = tonumber(p.max_players) or 8
+        local failed = finderFailedJobs[job]
+        if job ~= "" and job ~= cur and remain >= FINDER_MIN_REMAINING and players < maxp
+            and not (failed and failed > clock) then
+            local prev = best[job]
+            if not prev or remain > prev.remain then best[job] = { players = players, remain = remain } end
+        end
+    end
+    local list, total = {}, 0
+    for job, info in pairs(best) do
+        local w = math.max(1, 8 - (info.players or 0))
+        list[#list + 1] = { job = job, w = w }
+        total = total + w
+    end
+    if #list == 0 then return nil end
+    local r = math.random() * total
+    local acc = 0
+    for _, c in ipairs(list) do
+        acc = acc + c.w
+        if r <= acc then return c.job end
+    end
+    return list[#list].job
+end
+
+local function fetchHopServers()
+    local pid = game.PlaceId
+    local list = {}
+    local cursor = ""
+    for _ = 1, 3 do
+        local url = "https://games.roblox.com/v1/games/" .. pid .. "/servers/Public?sortOrder=Asc&limit=100"
+        if cursor ~= "" then url = url .. "&cursor=" .. cursor end
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if not ok then break end
+        local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not (ok2 and type(data) == "table" and type(data.data) == "table") then break end
+        for _, s in ipairs(data.data) do
+            if s.id ~= game.JobId and type(s.playing) == "number" and type(s.maxPlayers) == "number"
+                and s.playing < s.maxPlayers then
+                list[#list + 1] = { id = s.id, playing = s.playing }
+            end
+        end
+        cursor = tostring(data.nextPageCursor or "")
+        if cursor == "" then break end
+    end
+    table.sort(list, function(a, b) return a.playing < b.playing end)
+    return list
+end
+
+local function serverHop()
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if type(q) == "function" then pcall(q, "getgenv().WisHubGaG2TameResume = true") end
+    local pid = game.PlaceId
+    local attempt = 0
+    while st.autoTame and st.autoHop do
+        attempt = attempt + 1
+        dismissTeleportError()
+        teleportFailed = false
+        teleportFailResult = nil
+
+        local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
+        local usedJob = (st.useFinder and not usePublic) and finderPickJobId() or nil
+        if usedJob then
+            pcall(function() TeleportService:TeleportToPlaceInstance(pid, usedJob, LocalPlayer) end)
+        else
+            local servers = fetchHopServers()
+            if #servers > 0 then
+                local choice = servers[math.random(1, #servers)]
+                usedJob = choice.id
+                pcall(function() TeleportService:TeleportToPlaceInstance(pid, choice.id, LocalPlayer) end)
+            else
+                pcall(function() TeleportService:Teleport(pid, LocalPlayer) end)
+            end
+        end
+        local t0 = os.clock()
+        while not teleportFailed and os.clock() - t0 < 60 do
+            if not (st.autoTame and st.autoHop) then return false end
+            task.wait(0.5)
+        end
+        if teleportFailed then
+            local flooded = teleportFailResult == Enum.TeleportResult.Flooded
+            if usedJob then
+                local unauth = teleportFailResult == Enum.TeleportResult.Unauthorized
+                finderFailedJobs[usedJob] = os.clock() + (unauth and 36000 or 45)
+            end
+            notify(flooded and ("Rate-limited, waiting (#%d)"):format(attempt)
+                or ("Server full/failed, retrying (#%d)"):format(attempt))
+            if flooded then task.wait(12) else task.wait() end
+        else
+            notify(("Teleport stuck 1m, retrying (#%d)"):format(attempt))
+            task.wait(1)
+        end
+    end
+    return false
+end
+
+local function instantRejoin(reason)
+    reportError("Stuck (" .. tostring(reason) .. ") -- instant rejoin")
+    local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+    if type(q) == "function" then pcall(q, "getgenv().WisHubGaG2TameResume = true") end
+    for _ = 1, 6 do
+        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+        task.wait(1.5)
+    end
+end
+
+task.spawn(function()
+    local errStreak = 0
+    while true do
+        task.wait(0.4)
+        if st.autoTame then
+            local __ok, __err = pcall(function()
+                if st.autoHop then
+                    local readyDeadline = os.clock() + 30
+                    while os.clock() < readyDeadline
+                        and (LocalPlayer:GetAttribute("LoadingScreenDone") ~= true
+                            or not game:IsLoaded()
+                            or not hrp()
+                            or not mapFolder("WildPetSpawns")) do
+                        task.wait(0.3)
+                    end
+                    local windowEnd = os.clock() + math.max(1, tonumber(st.emptyHopGrace) or 4)
+                    while st.autoTame and st.autoHop do
+                        local target, ref = pickTarget()
+                        if target then
+                            doTameStep(target, ref)
+                            windowEnd = os.clock() + 4
+                        else
+                            if os.clock() > windowEnd then break end
+                            task.wait(0.5)
+                        end
+                    end
+                    if st.autoTame and st.autoHop then
+                        local held = os.clock()
+                        while firedPromptsRemaining() > 0 and st.autoTame and st.autoHop
+                            and os.clock() - held < 15 do
+                            task.wait(0.2)
+                        end
+                        for p in pairs(firedPrompts) do firedPrompts[p] = nil end
+
+                        if sessionTamed > 0 then
+                            reportDone()
+                            local hd = math.clamp(tonumber(st.hopDelay) or 5, 5, 30)
+                            local jitter = math.max(0, tonumber(st.hopJitter) or 0)
+                            if jitter > 0 then hd = hd + math.random() * jitter end
+                            notify(("Tamed %d, hopping in %.0fs"):format(sessionTamed, hd))
+                            local hstart = os.clock()
+                            while os.clock() - hstart < hd and st.autoTame and st.autoHop do
+                                task.wait(0.2)
+                            end
+                        else
+                            notify("No pet here -- hopping now")
+                        end
+
+                        sessionTamed = 0
+                        table.clear(sessionPets)
+                        if st.autoTame and st.autoHop then
+                            serverHop()
+                            task.wait(5)
+                        end
+                    end
+                else
+                    local target, ref = pickTarget()
+                    if target then doTameStep(target, ref) end
+                end
+            end)
+            if not __ok then
+                reportError(__err)
+                errStreak = errStreak + 1
+                local thr = math.max(0, math.floor(tonumber(st.rejoinOnError) or 0))
+                if thr > 0 and errStreak >= thr then
+                    errStreak = 0
+                    instantRejoin(__err)
+                end
+            else
+                errStreak = 0
+            end
+        end
+    end
+end)
+
+local fpsPlatform = nil
+local fpsPlatformConn = nil
+local fpsLoopId = 0
+local fpsFloorY = nil
+local fpsFeetOffset = 3
+
+local function fpsKeepSet()
+    local keep = {}
+    local m = workspace:FindFirstChild("Map")
+    if m then
+        for _, n in ipairs({ "WildPetSpawns", "WildPetRef", "PetSpawn" }) do
+            local inst = m:FindFirstChild(n)
+            if inst then keep[inst] = true end
+        end
+    end
+    local bp = workspace:FindFirstChild("Baseplate")
+    if bp then
+        local top = bp:FindFirstChild("TopLayer")
+        if top then keep[top] = true end
+    end
+    for _, pl in ipairs(Players:GetPlayers()) do
+        if pl.Character then keep[pl.Character] = true end
+    end
+    if fpsPlatform then keep[fpsPlatform] = true end
+    return keep
+end
+
+local function fpsClearWorld()
+    local keep = fpsKeepSet()
+    for _, c in ipairs(workspace:GetChildren()) do
+        if keep[c] or c:IsA("Camera") then
+        elseif c:IsA("Terrain") then
+            pcall(function() c:Clear() end)
+        elseif c.Name == "Map" or c.Name == "Baseplate" then
+            for _, mc in ipairs(c:GetChildren()) do
+                if not keep[mc] then pcall(function() mc:Destroy() end) end
+            end
+        elseif c:IsA("BasePart") or c:IsA("Model") or c:IsA("Folder") or c:IsA("UnionOperation") or c:IsA("MeshPart") then
+            pcall(function() c:Destroy() end)
+        end
+    end
+end
+
+local function ensureFpsPlatform()
+    if not (fpsPlatform and fpsPlatform.Parent) then
+        local p = Instance.new("Part")
+        p.Name = "WisHubFloor"
+        p.Size = Vector3.new(120, 2, 120)
+        p.Anchored = true
+        p.CanCollide = true
+        p.Transparency = 1
+        p.Parent = workspace
+        fpsPlatform = p
+    end
+    fpsFloorY = nil
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if char and root then
+        local ok, cf, size = pcall(function() return char:GetBoundingBox() end)
+        if ok and cf and size then fpsFeetOffset = root.Position.Y - (cf.Position.Y - size.Y / 2) end
+        fpsFloorY = root.Position.Y - fpsFeetOffset
+        fpsPlatform.Position = Vector3.new(root.Position.X, fpsFloorY - (fpsPlatform.Size.Y / 2), root.Position.Z)
+    end
+    if fpsPlatformConn then fpsPlatformConn:Disconnect() end
+    fpsPlatformConn = RunService.Heartbeat:Connect(function()
+        if not st.fpsBoost then return end
+        local r = hrp()
+        if not (r and fpsPlatform and fpsPlatform.Parent) then return end
+        local feetY = r.Position.Y - fpsFeetOffset
+        if fpsFloorY == nil or feetY < fpsFloorY - 0.5 then fpsFloorY = feetY end
+        fpsPlatform.Position = Vector3.new(r.Position.X, fpsFloorY - (fpsPlatform.Size.Y / 2), r.Position.Z)
+    end)
+end
+
+local function fpsSafeToStart()
+    if LocalPlayer:GetAttribute("LoadingScreenDone") ~= true then return false end
+    if LocalPlayer:GetAttribute("OfflineCutscenePlaying") == true then return false end
+    if LocalPlayer:GetAttribute("CutsceneInputBlocked") == true then return false end
+    if workspace:FindFirstChild("LoadingScreenMenu") then return false end
+    return hrp() ~= nil
+end
+
+local function fpsClearGardens()
+    local gardens = workspace:FindFirstChild("Gardens")
+    if not gardens then return end
+    local pid = LocalPlayer:GetAttribute("PlotId")
+    local myPlot = pid and ("Plot" .. tostring(pid)) or nil
+    for _, plot in ipairs(gardens:GetChildren()) do
+        if string.match(plot.Name, "^Plot%d+$") then
+            if myPlot and plot.Name ~= myPlot then
+                pcall(function() plot:Destroy() end)
+            else
+                local plants = plot:FindFirstChild("Plants")
+                if plants then
+                    for _, plant in ipairs(plants:GetChildren()) do
+                        pcall(function() plant:Destroy() end)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local fpsGameplayActive = false
+
+local function getParentType(desc)
+    local current = desc
+    local isFruit, isPlant = false, false
+    while current and current ~= workspace do
+        if current.Name == "Fruits" then isFruit = true end
+        if current.Name == "Plants" then isPlant = true end
+        current = current.Parent
+    end
+    return isFruit, isPlant
+end
+
+local function fpsProtected(desc)
+    if fpsPlatform and (desc == fpsPlatform or desc:IsDescendantOf(fpsPlatform)) then return true end
+    local char = LocalPlayer.Character
+    if char and desc:IsDescendantOf(char) then return true end
+    local m = workspace:FindFirstChild("Map")
+    if m then
+        local sp = m:FindFirstChild("WildPetSpawns")
+        local rfr = m:FindFirstChild("WildPetRef")
+        if sp and desc:IsDescendantOf(sp) then return true end
+        if rfr and desc:IsDescendantOf(rfr) then return true end
+    end
+    return false
+end
+
+local function superBrutalize(desc)
+    if fpsProtected(desc) then return end
+    if desc:IsA("ParticleEmitter") or desc:IsA("Beam") or desc:IsA("Trail") or desc:IsA("Fire")
+        or desc:IsA("Smoke") or desc:IsA("Sparkles") or desc:IsA("Light") or desc:IsA("PostEffect")
+        or desc:IsA("Texture") or desc:IsA("Decal") or desc:IsA("SurfaceAppearance")
+        or desc:IsA("Attachment") or desc:IsA("SpecialMesh") or desc:IsA("Motor6D")
+        or desc:IsA("Animator") or desc:IsA("AnimationController") then
+        pcall(function() desc:Destroy() end)
+        return
+    end
+    local n = string.lower(desc.Name)
+    if n:match("track") or n:match("trace") or n:match("arrow") or n:match("guide")
+        or n:match("pointer") or n:match("waypoint") or n:match("highlight") then
+        pcall(function() desc:Destroy() end)
+        return
+    end
+    if desc:IsA("PVAdornment") or desc:IsA("HandleAdornment") or desc:IsA("SurfaceGui") then
+        pcall(function() desc:Destroy() end)
+        return
+    end
+    if desc:IsA("BillboardGui") and desc.Name ~= "FruitESP" then
+        pcall(function() desc:Destroy() end)
+        return
+    end
+    if desc:IsA("BasePart") then
+        local parentModel = desc:FindFirstAncestorWhichIsA("Model")
+        if parentModel and string.lower(parentModel.Name):match("sprinkler") then
+            if desc.Size.X > 5 or desc.Size.Z > 5 then pcall(function() desc:Destroy() end) return end
+            if desc.Transparency > 0 then pcall(function() desc:Destroy() end) return end
+        end
+        if n:match("range") or n:match("radius") or n:match("area") or n:match("ring")
+            or n:match("effect") or n:match("zone") or n:match("indicator") or n:match("visual") then
+            pcall(function() desc:Destroy() end)
+            return
+        end
+        desc.CastShadow = false
+        local isFruit, isPlant = getParentType(desc)
+        if desc.Name == "HarvestPart" then
+            desc.Transparency = 1
+        elseif isFruit then
+            desc.Transparency = 1
+            desc.CanCollide = false
+            if desc:IsA("MeshPart") then pcall(function() desc.TextureID = "" end) end
+            desc.Material = Enum.Material.SmoothPlastic
+            desc.Reflectance = 0
+        elseif isPlant then
+            if desc.Name ~= "Base" then
+                desc.Transparency = 1
+                desc.CanCollide = false
+            end
+            desc.Anchored = true
+        else
+            desc.Material = Enum.Material.SmoothPlastic
+            desc.Reflectance = 0
+        end
+    end
+end
+
+local function nukeEnvironment()
+    for _, name in ipairs({ "BirdVisuals", "Birds", "BlizzardBeams", "Weather", "Clouds", "Rain" }) do
+        local obj = workspace:FindFirstChild(name)
+        if obj then pcall(function() obj:Destroy() end) end
+    end
+    local terrain = workspace:FindFirstChildOfClass("Terrain")
+    if terrain then
+        pcall(function()
+            terrain.WaterWaveSize = 0
+            terrain.WaterWaveSpeed = 0
+            terrain.WaterReflectance = 0
+            terrain.WaterTransparency = 1
+            terrain.Decoration = false
+        end)
+    end
+end
+
+local function optimizeWorld()
+    pcall(function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        Lighting.Brightness = 0
+        for _, child in ipairs(Lighting:GetChildren()) do
+            if child:IsA("BloomEffect") or child:IsA("BlurEffect") or child:IsA("ColorCorrectionEffect")
+                or child:IsA("SunRaysEffect") or child:IsA("DepthOfFieldEffect")
+                or child:IsA("Atmosphere") or child:IsA("Sky") then
+                child:Destroy()
+            end
+        end
+    end)
+    nukeEnvironment()
+    for _, desc in ipairs(workspace:GetDescendants()) do
+        pcall(superBrutalize, desc)
+    end
+end
+
+workspace.DescendantAdded:Connect(function(desc)
+    if not (st.fpsBoost and fpsGameplayActive) then return end
+    local char = LocalPlayer.Character
+    if char and desc:IsDescendantOf(char) then return end
+    task.defer(function()
+        if st.fpsBoost and fpsGameplayActive and desc and desc.Parent then
+            pcall(superBrutalize, desc)
+        end
+    end)
+end)
+
+local function startFpsBoost()
+    fpsLoopId = fpsLoopId + 1
+    local id = fpsLoopId
+    task.spawn(function()
+        while st.fpsBoost and fpsLoopId == id and not fpsSafeToStart() do
+            pcall(fpsClearGardens)
+            task.wait(0.5)
+        end
+        if not (st.fpsBoost and fpsLoopId == id) then return end
+        fpsGameplayActive = true
+        ensureFpsPlatform()
+        pcall(fpsClearWorld)
+        pcall(optimizeWorld)
+        while st.fpsBoost and fpsLoopId == id do
+            task.wait(2)
+            if st.fpsBoost and fpsSafeToStart() then pcall(fpsClearWorld) end
+        end
+        fpsGameplayActive = false
+    end)
+end
+
+task.spawn(function()
+    while true do
+        task.wait(math.max(5, tonumber(st.sellFruitDelay) or 30))
+        if st.autoSellFruit then
+            pcall(function()
+                local preview = Networking.NPCS.PreviewSellAll:Fire()
+                if type(preview) == "table" and (tonumber(preview.FruitCount) or 0) > 0 then
+                    Networking.NPCS.SellAll:Fire()
+                    notify(("Sold fruit x%s"):format(tostring(preview.FruitCount)))
+                end
+            end)
+        end
+    end
+end)
+
+task.spawn(function()
+    while true do
+        task.wait(math.max(10, tonumber(st.claimMailboxDelay) or 60))
+        if st.autoClaimMailbox then
+            pcall(function() Networking.Mailbox.ClaimAll:Fire() end)
+        end
+    end
+end)
+
+startSellLoop()
+if st.fpsBoost then startFpsBoost() end
+
+notify(("Loaded (no-UI) - tame=%s hop=%s sellPet=%s sellFruit=%s mailbox=%s fps=%s"):format(
+    tostring(st.autoTame), tostring(st.autoHop), tostring(st.autoSellPet),
+    tostring(st.autoSellFruit), tostring(st.autoClaimMailbox), tostring(st.fpsBoost)))
