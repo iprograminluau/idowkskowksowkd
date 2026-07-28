@@ -241,19 +241,62 @@ task.spawn(function()
         return false
     end
 
+    local UIS = game:GetService("UserInputService")
+
+    local function tryFireListeners()
+        if type(getconnections) ~= "function" then return false end
+        local fired = 0
+        pcall(function()
+            for _, c in ipairs(getconnections(UIS.InputBegan)) do
+                local f = c.Function
+                if f and type(c.Fire) == "function" then
+                    local oks, src = pcall(debug.info, f, "s")
+                    if oks and type(src) == "string" and src:lower():find("loading", 1, true) then
+                        pcall(function() c:Fire() end)
+                        fired = fired + 1
+                    end
+                end
+            end
+        end)
+        return fired > 0
+    end
+
+    local SKIP_POINTS = {
+        { 0.50, 0.50 },
+        { 0.50, 0.86 },
+        { 0.10, 0.50 },
+        { 0.90, 0.50 },
+    }
+
+    local function clickAt(x, y)
+        pcall(function()
+            VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+            VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+        pcall(function()
+            VIM:SendTouchEvent(1, 0, x, y)
+            VIM:SendTouchEvent(1, 2, x, y)
+        end)
+    end
+
     local function sendSkip()
+        if tryFireListeners() then return end
+
         pcall(function()
             for _, key in ipairs({ Enum.KeyCode.Space, Enum.KeyCode.Return, Enum.KeyCode.E }) do
                 VIM:SendKeyEvent(true, key, false, game)
                 VIM:SendKeyEvent(false, key, false, game)
             end
-            local cam = workspace.CurrentCamera
-            local vp = cam and cam.ViewportSize
-            local cx, cy = 200, 200
-            if vp and vp.X > 4 then cx, cy = math.floor(vp.X / 2), math.floor(vp.Y / 2) end
-            VIM:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-            VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
         end)
+
+        local cam = workspace.CurrentCamera
+        local vp = cam and cam.ViewportSize
+        local w, h = 400, 400
+        if vp and vp.X > 4 then w, h = vp.X, vp.Y end
+        for _, pt in ipairs(SKIP_POINTS) do
+            clickAt(math.floor(w * pt[1]), math.floor(h * pt[2]))
+            task.wait(0.15)
+        end
     end
 
     local t0 = os.clock()
@@ -273,9 +316,9 @@ task.spawn(function()
             if LP:GetAttribute("LoadingScreenActive") or innerFrame() then
                 local fl = fullyLoaded()
                 if fl == true then
-                    sendSkip(); waitDone(1.5)
+                    sendSkip(); waitDone(2)
                 elseif ready() and os.clock() - tActive >= 8 then
-                    sendSkip(); waitDone(1.5)
+                    sendSkip(); waitDone(2)
                 end
             end
         end)
