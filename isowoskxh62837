@@ -1044,19 +1044,35 @@ local function buildJobList()
         end
     end
 
+    local finderJobs = {}
     local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
     if st.useFinder and not usePublic then
         local want = math.max(0, math.floor(tonumber(st.finderCandidates) or 10))
-        if want > 0 then
-            for _, j in ipairs(finderPickJobs(want)) do add(j) end
-        end
+        if want > 0 then finderJobs = finderPickJobs(want) end
     end
 
+    local publicJobs = {}
     local pubWant = math.max(0, math.floor(tonumber(st.publicCandidates) or 5))
     if pubWant > 0 then
         local servers = fetchHopServers(false)
         if #servers == 0 then servers = fetchHopServers(true) end
-        for i = 1, math.min(#servers, pubWant) do add(servers[i].id) end
+        for i = 1, math.min(#servers, pubWant) do
+            publicJobs[#publicJobs + 1] = servers[i].id
+        end
+    end
+
+    local fi, pi = 1, 1
+    while fi <= #finderJobs or pi <= #publicJobs do
+        for _ = 1, 2 do
+            if fi <= #finderJobs then
+                add(finderJobs[fi])
+                fi = fi + 1
+            end
+        end
+        if pi <= #publicJobs then
+            add(publicJobs[pi])
+            pi = pi + 1
+        end
     end
 
     return jobs
