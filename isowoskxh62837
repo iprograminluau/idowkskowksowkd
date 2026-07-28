@@ -22,7 +22,7 @@ local CONFIG = {
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
     tameMoveSpeed   = 30,      -- how fast you walk to each pet (16 = normal ... 50 = max)
     tameSettleTime  = 0.1,       -- seconds to stand still after arriving before the first tame fire (lets the server register our position; 0 = fire ASAP)
-    tameReturnAfter = true,    -- (no effect while protectWildTame is false)
+    tameReturnAfter = false,    -- (no effect while protectWildTame is false)
     maxPetPrice     = 20000000,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
     protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
 
