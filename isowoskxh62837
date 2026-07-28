@@ -43,7 +43,7 @@ local CONFIG = {
     charLoadTimeout = 10,  -- avatar never appears (no char/analog stick)? rejoin after this many seconds (0 = off)
     rejoinOnError   = 0.1,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
     kickBeforeHop   = true, -- kick yourself first, then teleport from the executor thread (VM survives the kick)
-    kickRejoinDelay = 8,   -- seconds between the kick and the teleport fire
+    kickRejoinDelay = 5,   -- seconds between the kick and the teleport fire
     kickRetryDelay  = 0.01,  -- seconds between teleport retries after the kick (too low = Roblox rate limit)
     kickRetryCount  = 200,  -- how many teleport retries before giving up and letting autoRejoin take over
     skipLoading = true,    -- spam a centre click every 2s from the moment the script runs
