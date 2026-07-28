@@ -6,11 +6,11 @@ local CONFIG = {
     ------------------------------------------------------------------ AUTO TAME
     autoTame        = true,    -- true = continuously tame matching wild pets
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
-    hopDelay        = 5,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopDelay        = 17,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
     emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
-    finderPublicMix = 0.4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderPublicMix = 4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Rare",
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
@@ -1034,9 +1034,10 @@ local function hopTo(pid, job)
     _G.__WISHUB_INTENTIONAL_KICK = true
     task.spawn(function()
         task.wait(delaySec)
-        for _ = 1, 6 do
+        for _ = 1, 20 do
+            dismissTeleportError()
             doTeleport(pid, job)
-            task.wait(2)
+            task.wait(1.2)
         end
         _G.__WISHUB_INTENTIONAL_KICK = false
     end)
@@ -1262,6 +1263,27 @@ local function fpsSafeToStart()
     return hrp() ~= nil
 end
 
+local function fpsClearGardens()
+    local gardens = workspace:FindFirstChild("Gardens")
+    if not gardens then return end
+    local pid = LocalPlayer:GetAttribute("PlotId")
+    local myPlot = pid and ("Plot" .. tostring(pid)) or nil
+    for _, plot in ipairs(gardens:GetChildren()) do
+        if string.match(plot.Name, "^Plot%d+$") then
+            if myPlot and plot.Name ~= myPlot then
+                pcall(function() plot:Destroy() end)
+            else
+                local plants = plot:FindFirstChild("Plants")
+                if plants then
+                    for _, plant in ipairs(plants:GetChildren()) do
+                        pcall(function() plant:Destroy() end)
+                    end
+                end
+            end
+        end
+    end
+end
+
 local fpsGameplayActive = false
 
 local function getParentType(desc)
@@ -1398,17 +1420,15 @@ local function startFpsBoost()
     fpsLoopId = fpsLoopId + 1
     local id = fpsLoopId
     task.spawn(function()
-        while st.fpsBoost and fpsLoopId == id and not fpsSafeToStart() do
-            task.wait(0.5)
-        end
-        if not (st.fpsBoost and fpsLoopId == id) then return end
         fpsGameplayActive = true
+        pcall(fpsClearGardens)
         ensureFpsPlatform()
         pcall(fpsClearWorld)
         pcall(optimizeWorld)
         while st.fpsBoost and fpsLoopId == id do
             task.wait(2)
-            if st.fpsBoost and fpsSafeToStart() then pcall(fpsClearWorld) end
+            pcall(fpsClearGardens)
+            pcall(fpsClearWorld)
         end
         fpsGameplayActive = false
     end)
