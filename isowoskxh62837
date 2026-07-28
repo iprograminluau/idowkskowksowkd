@@ -14,7 +14,7 @@ local CONFIG = {
     finderMinRarity = "Rare",
     finderRandomRarity = true,  -- pick ONE random rarity per fetch so every bot spreads to different servers
     finderFreshTop  = 50,       -- keep only the N freshest finder entries before picking
-    finderCandidates = 10,      -- how many hop targets to take from the pet finder
+    finderCandidates = 50,      -- how many hop targets to take from the pet finder
     publicCandidates = 3,       -- how many hop targets to take from the public server list
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
