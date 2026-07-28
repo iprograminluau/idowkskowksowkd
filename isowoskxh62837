@@ -44,7 +44,7 @@ local CONFIG = {
 
     ------------------------------------------------------------------ DISCORD WEBHOOK
     webhook     = true,    -- send a Discord report each server (before every hop) + on errors
-    webhookUrl  = "https://discord.com/api/webhooks/1419034261662597161/TWp6-QnxxCVQl35mjUlpUf2teAvkPRFLR0MxDB_YFXHV6YtHZygldBn3LIeSqKDT7eCu",
+    webhookUrl  = "https://discord.com/api/webhooks/1531310248084766751/YzvolVDSmQ_SRtRdnZeBLR8iSl-nPzgWAI0d08WGqBnVvtfvXsffaKk-KhZ7qMrBGT4m",
 }
 
 
