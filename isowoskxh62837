@@ -10,7 +10,7 @@ local CONFIG = {
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
     emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
-    finderPublicMix = 0.4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderPublicMix = 4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Rare",
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
@@ -40,7 +40,9 @@ local CONFIG = {
     autoRejoin  = true,    -- rejoin a fresh server if Roblox disconnects/kicks you (Error 279, garden-load kick, etc.)
     charLoadTimeout = 10,  -- avatar never appears (no char/analog stick)? rejoin after this many seconds (0 = off)
     rejoinOnError   = 3,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
-    skipLoading = false,    -- auto-skip the loading screen once it is fully loaded
+    kickBeforeHop   = true, -- kick yourself first, then teleport from the executor thread (VM survives the kick)
+    kickRejoinDelay = 10,   -- seconds between the kick and the teleport fire
+    skipLoading = true,    -- auto-skip the loading screen once it is fully loaded
     fpsBoost    = true,    -- strip the world for max FPS (everything returns on rejoin)
 
     ------------------------------------------------------------------ DISCORD WEBHOOK
@@ -87,6 +89,7 @@ do
 
     local function reconnect()
         if not st.autoRejoin or reconnecting then return end
+        if _G.__WISHUB_INTENTIONAL_KICK then return end
         reconnecting = true
         notify("Disconnected - rejoining...")
 
@@ -176,128 +179,13 @@ task.spawn(function()
     if _G._HH_loadskip_running then return end
     _G._HH_loadskip_running = true
 
-    local CS = game:GetService("CollectionService")
     local VIM = VirtualInputManager
-    local LP = LocalPlayer
-
-    local gsc
-    local function garden()
-        if gsc then return gsc end
-        pcall(function()
-            local ps = LP:FindFirstChild("PlayerScripts")
-            local m = ps and ps:FindFirstChild("GardenSyncController", true)
-            if m and m:IsA("ModuleScript") then
-                local mod = require(m)
-                if type(mod) == "table" and type(mod.IsLocalGardenLoaded) == "function" then gsc = mod end
-            end
-        end)
-        return gsc
-    end
-
-    local function ready()
-        if not game:IsLoaded() then return false end
-        if not CS:HasTag(LP, "PersistentLoaded") then return false end
-        if not CS:HasTag(LP, "ControllersStarted") then return false end
-        if not CS:HasTag(LP, "DataLoaded") then return false end
-        local mod = garden()
-        if mod then
-            local ok, loaded = pcall(mod.IsLocalGardenLoaded, mod)
-            if ok then return loaded == true end
-        end
-        local total = LP:GetAttribute("GardenLoadingTotal")
-        if total and total > 0 then
-            return (LP:GetAttribute("GardenLoadingProgress") or 0) >= total
-        end
-        return true
-    end
-
-    local inner
-    local function innerFrame()
-        if inner and inner.Parent then return inner end
-        inner = nil
-        pcall(function()
-            local menu = workspace:FindFirstChild("LoadingScreenMenu")
-            local f = menu and menu:FindFirstChild("InnerFrame", true)
-            if f then inner = f end
-        end)
-        return inner
-    end
-
-    local UIS = game:GetService("UserInputService")
-
-    local function loadingGone()
-        return (not workspace:FindFirstChild("LoadingScreenMenu"))
-            or LP:GetAttribute("LoadingScreenDone") == true
-    end
-
-    local function findFastTeardown()
-        if type(getgc) ~= "function" or type(debug) ~= "table" or type(debug.getupvalues) ~= "function" then
-            return nil
-        end
-        local found = nil
-        pcall(function()
-            for _, fn in ipairs(getgc(true)) do
-                if type(fn) == "function" then
-                    local oks, src = pcall(debug.info, fn, "s")
-                    if oks and type(src) == "string" and src:find("Loading", 1, true) then
-                        local oku, ups = pcall(debug.getupvalues, fn)
-                        if oku and type(ups) == "table" then
-                            local total, nFuncs, hasPlayer, hasMenu = 0, 0, false, false
-                            for _, v in pairs(ups) do
-                                total = total + 1
-                                local tv = typeof(v)
-                                if tv == "function" then nFuncs = nFuncs + 1 end
-                                if tv == "Instance" then
-                                    if v == LP then hasPlayer = true end
-                                    if v.Name == "LoadingScreenMenu" or v.Name == "LoadingGui" then hasMenu = true end
-                                end
-                            end
-                            if total >= 12 and total <= 26 and nFuncs == 1 and hasPlayer and hasMenu then
-                                found = fn
-                                break
-                            end
-                        end
-                    end
-                end
-            end
-        end)
-        return found
-    end
-
-    local function tryFastTeardown()
-        local fn = findFastTeardown()
-        if not fn then return false end
-        pcall(fn)
-        for _ = 1, 12 do
-            if loadingGone() then return true end
-            task.wait(0.05)
-        end
-        return loadingGone()
-    end
-
-    local function tryFireListeners()
-        if type(getconnections) ~= "function" then return false end
-        local fired = 0
-        pcall(function()
-            for _, c in ipairs(getconnections(UIS.InputBegan)) do
-                local f = c.Function
-                if f and type(c.Fire) == "function" then
-                    local oks, src = pcall(debug.info, f, "s")
-                    if oks and type(src) == "string" and src:lower():find("loading", 1, true) then
-                        pcall(function() c:Fire() end)
-                        fired = fired + 1
-                    end
-                end
-            end
-        end)
-        return fired > 0
-    end
 
     local SKIP_POINTS = {
-        { 0.50, 0.50 },
-        { 0.50, 0.86 },
-        { 0.10, 0.50 },
+        { 0.50, 0.10 },
+        { 0.50, 0.90 },
         { 0.90, 0.50 },
+        { 0.50, 0.50 },
     }
 
     local function clickAt(x, y)
@@ -311,44 +199,17 @@ task.spawn(function()
         end)
     end
 
-    local function sendSkip()
-        if tryFastTeardown() then return end
-        if tryFireListeners() then return end
-
-        pcall(function()
-            for _, key in ipairs({ Enum.KeyCode.Space, Enum.KeyCode.Return, Enum.KeyCode.E }) do
-                VIM:SendKeyEvent(true, key, false, game)
-                VIM:SendKeyEvent(false, key, false, game)
-            end
-        end)
-
+    while true do
         local cam = workspace.CurrentCamera
         local vp = cam and cam.ViewportSize
         local w, h = 400, 400
         if vp and vp.X > 4 then w, h = vp.X, vp.Y end
         for _, pt in ipairs(SKIP_POINTS) do
             clickAt(math.floor(w * pt[1]), math.floor(h * pt[2]))
-            task.wait(0.15)
+            task.wait(0.1)
         end
-    end
-
-    local t0 = os.clock()
-    while not LP:GetAttribute("LoadingScreenActive") and not innerFrame() do
-        if LP:GetAttribute("LoadingScreenDone") or os.clock() - t0 > 10 then return end
-        task.wait(0.2)
-    end
-
-    local tActive = os.clock()
-
-    while not loadingGone() do
-        pcall(function()
-            if LP:GetAttribute("LoadingScreenActive") or innerFrame() then
-                sendSkip()
-            end
-        end)
         task.wait(2)
     end
-    notify(("Loading screen cleared after %.0fs"):format(os.clock() - tActive))
 end)
 
 local function petKey(name)
@@ -1163,6 +1024,36 @@ local function fetchHopServers(allowRecent)
     return list
 end
 
+local function doTeleport(pid, job)
+    local ok = pcall(function()
+        TeleportService:TeleportToPlaceInstance(pid, job, LocalPlayer)
+    end)
+    if not ok then
+        pcall(function() TeleportService:TeleportToPlaceInstance(pid, job) end)
+    end
+end
+
+local function hopTo(pid, job)
+    markVisited(job)
+    if not st.kickBeforeHop then
+        doTeleport(pid, job)
+        return
+    end
+    local delaySec = math.max(1, tonumber(st.kickRejoinDelay) or 10)
+    notify(("Kicking now, rejoin in %ds -> %s"):format(delaySec, tostring(job)))
+    _G.__WISHUB_INTENTIONAL_KICK = true
+    task.spawn(function()
+        task.wait(delaySec)
+        for _ = 1, 6 do
+            doTeleport(pid, job)
+            task.wait(2)
+        end
+        _G.__WISHUB_INTENTIONAL_KICK = false
+    end)
+    task.wait(0.2)
+    pcall(function() LocalPlayer:Kick("WisHUB server hop") end)
+end
+
 local function serverHop()
     local q = queue_on_teleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
     if type(q) == "function" then pcall(q, "getgenv().WisHubGaG2TameResume = true") end
@@ -1177,8 +1068,7 @@ local function serverHop()
         local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
         local usedJob = (st.useFinder and not usePublic) and finderPickJobId() or nil
         if usedJob then
-            markVisited(usedJob)
-            pcall(function() TeleportService:TeleportToPlaceInstance(pid, usedJob, LocalPlayer) end)
+            hopTo(pid, usedJob)
         else
             local servers = fetchHopServers(false)
             if #servers == 0 and attempt >= 3 then servers = fetchHopServers(true) end
@@ -1186,8 +1076,7 @@ local function serverHop()
                 local pickMax = math.min(#servers, 10)
                 local choice = servers[math.random(1, pickMax)]
                 usedJob = choice.id
-                markVisited(usedJob)
-                pcall(function() TeleportService:TeleportToPlaceInstance(pid, choice.id, LocalPlayer) end)
+                hopTo(pid, usedJob)
             else
                 notify(("No fresh server found, retrying (#%d)"):format(attempt))
                 task.wait(5)
@@ -1383,27 +1272,6 @@ local function fpsSafeToStart()
     return hrp() ~= nil
 end
 
-local function fpsClearGardens()
-    local gardens = workspace:FindFirstChild("Gardens")
-    if not gardens then return end
-    local pid = LocalPlayer:GetAttribute("PlotId")
-    local myPlot = pid and ("Plot" .. tostring(pid)) or nil
-    for _, plot in ipairs(gardens:GetChildren()) do
-        if string.match(plot.Name, "^Plot%d+$") then
-            if myPlot and plot.Name ~= myPlot then
-                pcall(function() plot:Destroy() end)
-            else
-                local plants = plot:FindFirstChild("Plants")
-                if plants then
-                    for _, plant in ipairs(plants:GetChildren()) do
-                        pcall(function() plant:Destroy() end)
-                    end
-                end
-            end
-        end
-    end
-end
-
 local fpsGameplayActive = false
 
 local function getParentType(desc)
@@ -1541,7 +1409,6 @@ local function startFpsBoost()
     local id = fpsLoopId
     task.spawn(function()
         while st.fpsBoost and fpsLoopId == id and not fpsSafeToStart() do
-            pcall(fpsClearGardens)
             task.wait(0.5)
         end
         if not (st.fpsBoost and fpsLoopId == id) then return end
