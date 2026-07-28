@@ -15,7 +15,7 @@ local CONFIG = {
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
-    tameMoveSpeed   = 35,      -- how fast you walk to each pet (16 = normal ... 50 = max)
+    tameMoveSpeed   = 30,      -- how fast you walk to each pet (16 = normal ... 50 = max)
     tameSettleTime  = 2,       -- seconds to stand still after arriving before the first tame fire (lets the server register our position; 0 = fire ASAP)
     tameReturnAfter = true,    -- (no effect while protectWildTame is false)
     maxPetPrice     = 0,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
