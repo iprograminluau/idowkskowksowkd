@@ -12,6 +12,8 @@ local CONFIG = {
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 0.4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Rare",
+    finderCandidates = 10,      -- how many hop targets to take from the pet finder
+    publicCandidates = 5,       -- how many hop targets to take from the public server list
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
@@ -934,9 +936,10 @@ local function finderFetch()
     return type(decoded) == "table" and decoded or nil
 end
 
-local function finderPickJobId()
+local function finderPickJobs(count)
+    count = math.max(1, math.floor(tonumber(count) or 1))
     local pets = finderFetch()
-    if not pets then return nil end
+    if not pets then return {} end
     local cur = normJob(game.JobId)
     local now = os.time()
     local clock = os.clock()
@@ -979,15 +982,21 @@ local function finderPickJobId()
     if #list == 0 and minRank > 0 then build(0, false) end
     if #list == 0 then build(minRank, true) end
     if #list == 0 then build(0, true) end
-    if #list == 0 then return nil end
+    if #list == 0 then return {} end
 
-    local r = math.random() * total
-    local acc = 0
-    for _, c in ipairs(list) do
-        acc = acc + c.w
-        if r <= acc then return c.job end
+    local out = {}
+    while #out < count and #list > 0 and total > 0 do
+        local r = math.random() * total
+        local acc, idx = 0, #list
+        for i, c in ipairs(list) do
+            acc = acc + c.w
+            if r <= acc then idx = i break end
+        end
+        out[#out + 1] = list[idx].job
+        total = total - list[idx].w
+        table.remove(list, idx)
     end
-    return list[#list].job
+    return out
 end
 
 local function fetchHopServers(allowRecent)
@@ -1037,15 +1046,18 @@ local function buildJobList()
 
     local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
     if st.useFinder and not usePublic then
-        for _ = 1, 5 do
-            local j = finderPickJobId()
-            if j then add(j) end
+        local want = math.max(0, math.floor(tonumber(st.finderCandidates) or 10))
+        if want > 0 then
+            for _, j in ipairs(finderPickJobs(want)) do add(j) end
         end
     end
 
-    local servers = fetchHopServers(false)
-    if #servers == 0 then servers = fetchHopServers(true) end
-    for i = 1, math.min(#servers, 15) do add(servers[i].id) end
+    local pubWant = math.max(0, math.floor(tonumber(st.publicCandidates) or 5))
+    if pubWant > 0 then
+        local servers = fetchHopServers(false)
+        if #servers == 0 then servers = fetchHopServers(true) end
+        for i = 1, math.min(#servers, pubWant) do add(servers[i].id) end
+    end
 
     return jobs
 end
@@ -1162,7 +1174,7 @@ task.spawn(function()
                         end
                         for p in pairs(firedPrompts) do firedPrompts[p] = nil end
 
-                         if sessionTamed > 0 then
+                        if sessionTamed > 0 then
                             local hd = math.clamp(tonumber(st.hopDelay) or 5, 5, 30)
                             local jitter = math.max(0, tonumber(st.hopJitter) or 0)
                             if jitter > 0 then hd = hd + math.random() * jitter end
@@ -1177,11 +1189,6 @@ task.spawn(function()
                                     task.wait(0.3)
                                 end
                             end
-                            reportDone()
-                        else
-                            notify("No pet here -- hopping now")
-                        end
-
                             reportDone()
                         else
                             notify("No pet here -- hopping now")
