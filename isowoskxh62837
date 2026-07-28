@@ -181,13 +181,6 @@ task.spawn(function()
 
     local VIM = VirtualInputManager
 
-    local SKIP_POINTS = {
-        { 0.50, 0.10 },
-        { 0.50, 0.90 },
-        { 0.90, 0.50 },
-        { 0.50, 0.50 },
-    }
-
     local function clickAt(x, y)
         pcall(function()
             VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
@@ -204,10 +197,7 @@ task.spawn(function()
         local vp = cam and cam.ViewportSize
         local w, h = 400, 400
         if vp and vp.X > 4 then w, h = vp.X, vp.Y end
-        for _, pt in ipairs(SKIP_POINTS) do
-            clickAt(math.floor(w * pt[1]), math.floor(h * pt[2]))
-            task.wait(0.1)
-        end
+        clickAt(math.floor(w / 2), math.floor(h / 2))
         task.wait(2)
     end
 end)
