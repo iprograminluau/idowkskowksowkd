@@ -12,13 +12,15 @@ local CONFIG = {
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 5,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
-    finderMinRarity = "Rare",
+    finderMinRarity = "Rare",   -- prioritize this rarity and above; drops to lower tiers only if none are available ("" = off)
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
-    tameMoveSpeed   = 60,      -- how fast you walk to each pet (16 = normal ... 50 = max)
+    tameMoveSpeed   = 8,      -- how fast you walk to each pet (16 = normal ... 50 = max)
+    tameTimeout     = 10,      -- give up on a pet after this many seconds of failed tame attempts
+    tameMaxFails    = 2,       -- after this many timeouts on the same pet, blacklist it for this server
     tameReturnAfter = true,    -- (no effect while protectWildTame is false)
-    maxPetPrice     = 20000000,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
+    maxPetPrice     = 0,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
     protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
 
     ------------------------------------------------------------------ AUTO SELL PET
@@ -464,6 +466,7 @@ local function firedPromptsRemaining()
 end
 
 local cooldown = {}
+local tameFails = {}
 
 local function matchesWhitelist(rarity, name)
     local rOK = (#st.tameRarities == 0) or (table.find(st.tameRarities, rarity) ~= nil)
@@ -638,15 +641,48 @@ local function pickTarget()
     return best, bestRef
 end
 
+local function prepPrompt(prompt)
+    pcall(function()
+        prompt.RequiresLineOfSight = false
+        prompt.HoldDuration = 0
+        if prompt.MaxActivationDistance < 30 then prompt.MaxActivationDistance = 30 end
+        prompt.Enabled = true
+    end)
+end
+
+local TAME_OFFSETS = {
+    Vector3.new(0, 0, 0),
+    Vector3.new(3, 0, 0),
+    Vector3.new(-3, 0, 0),
+    Vector3.new(0, 0, 3),
+    Vector3.new(0, 0, -3),
+    Vector3.new(0, 3, 0),
+}
+
+local function fireTame(prompt, ref, attempt)
+    local mode = attempt % 3
+    if mode == 1 and type(fireproximityprompt) == "function" then
+        pcall(function() fireproximityprompt(prompt) end)
+    elseif mode == 2 and type(fireproximityprompt) == "function" then
+        pcall(function() fireproximityprompt(prompt, 1) end)
+    else
+        pcall(function() Networking.Pets.WildPetTame:Fire(ref) end)
+    end
+end
+
 local function fastTame(visual, ref)
     local rp = visual:FindFirstChild("RootPart")
     local prompt = rp and rp:FindFirstChild("BuyPrompt")
     local root = hrp()
     if not (rp and prompt and root) then return false end
+    prepPrompt(prompt)
+    local timeout = math.max(4, tonumber(st.tameTimeout) or 10)
     local start = os.clock()
     local lastT = os.clock()
     local settledAt = nil
     local firedOnce = false
+    local firstFireAt = nil
+    local attempt = 0
     local lastFire = 0
     local ok = false
     while true do
@@ -669,11 +705,13 @@ local function fastTame(visual, ref)
         local cap = tonumber(st.maxPetPrice) or 0
         if cap > 0 and (tonumber(ref:GetAttribute("Price")) or 0) > cap then break end
         if not firedOnce and os.clock() - start > 8 then break end
-        if firedOnce and os.clock() - start > 20 then break end
+        if firstFireAt and os.clock() - firstFireAt > timeout then break end
         local now = os.clock()
         local dt = math.min(now - lastT, 0.1)
         lastT = now
-        local goal = (refCFrame(ref) or rp.CFrame).Position
+        local base = (refCFrame(ref) or rp.CFrame).Position
+        local off = TAME_OFFSETS[(math.floor(attempt / 3) % #TAME_OFFSETS) + 1]
+        local goal = base + off
         local cur = root.Position
         local to = goal - cur
         local dist = to.Magnitude
@@ -682,22 +720,21 @@ local function fastTame(visual, ref)
             settledAt = nil
             local step = math.min(speed * dt, dist - 5)
             local nextPos = cur + to.Unit * step
-            root.CFrame = CFrame.lookAt(nextPos, Vector3.new(goal.X, nextPos.Y, goal.Z))
+            root.CFrame = CFrame.lookAt(nextPos, Vector3.new(base.X, nextPos.Y, base.Z))
             pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
         else
-            root.CFrame = CFrame.lookAt(cur, Vector3.new(goal.X, cur.Y, goal.Z))
+            root.CFrame = CFrame.lookAt(cur, Vector3.new(base.X, cur.Y, base.Z))
             pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
             settledAt = settledAt or now
-            if now - settledAt > 0.6 and now - lastFire > 0.4 then
+            local gap = firedOnce and 1.2 or 0.4
+            if now - settledAt > 0.6 and now - lastFire > gap then
                 lastFire = now
+                attempt = attempt + 1
                 firedOnce = true
+                firstFireAt = firstFireAt or now
                 markTameFired(ref)
                 trackFiredPrompt(prompt)
-                if type(fireproximityprompt) == "function" then
-                    pcall(function() fireproximityprompt(prompt) end)
-                else
-                    pcall(function() Networking.Pets.WildPetTame:Fire(ref) end)
-                end
+                fireTame(prompt, ref, attempt)
             end
         end
         RunService.Heartbeat:Wait()
@@ -717,8 +754,20 @@ local function doTameStep(target, ref)
             cooldown[target] = os.clock() + 12
         end
     else
-        fastTame(target, ref)
-        cooldown[target] = os.clock() + 2
+        if fastTame(target, ref) then
+            tameFails[target] = nil
+            cooldown[target] = os.clock() + 2
+        else
+            local n = (tameFails[target] or 0) + 1
+            tameFails[target] = n
+            local maxFails = math.max(1, tonumber(st.tameMaxFails) or 2)
+            if n >= maxFails then
+                cooldown[target] = os.clock() + 300
+                notify(("Pet stuck x%d, blacklisted for this server"):format(n))
+            else
+                cooldown[target] = os.clock() + 5
+            end
+        end
     end
 end
 
