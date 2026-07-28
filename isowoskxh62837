@@ -1162,25 +1162,26 @@ task.spawn(function()
                         end
                         for p in pairs(firedPrompts) do firedPrompts[p] = nil end
 
-                        if sessionTamed > 0 then
+                         if sessionTamed > 0 then
                             local hd = math.clamp(tonumber(st.hopDelay) or 5, 5, 30)
                             local jitter = math.max(0, tonumber(st.hopJitter) or 0)
                             if jitter > 0 then hd = hd + math.random() * jitter end
                             notify(("Tamed %d, watching for respawns for %.0fs"):format(sessionTamed, hd))
 
                             local hstart = os.clock()
-                            local hardStop = os.clock() + hd * 3
-                            while os.clock() - hstart < hd
-                                and os.clock() < hardStop
-                                and st.autoTame and st.autoHop do
+                            while os.clock() - hstart < hd and st.autoTame and st.autoHop do
                                 local t2, r2 = pickTarget()
                                 if t2 then
                                     doTameStep(t2, r2)
-                                    hstart = os.clock()
                                 else
                                     task.wait(0.3)
                                 end
                             end
+                            reportDone()
+                        else
+                            notify("No pet here -- hopping now")
+                        end
+
                             reportDone()
                         else
                             notify("No pet here -- hopping now")
