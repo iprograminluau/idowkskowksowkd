@@ -11,7 +11,7 @@ local CONFIG = {
     emptyHopGrace   = 0.4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 0,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
-    finderMinRarity = "Rare",
+    finderMinRarity = "Common",
     finderCandidates = 100,      -- how many hop targets to take from the pet finder
     publicCandidates = 0,       -- how many hop targets to take from the public server list
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
