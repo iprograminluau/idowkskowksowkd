@@ -6,7 +6,7 @@ local CONFIG = {
     ------------------------------------------------------------------ AUTO TAME
     autoTame        = true,    -- true = continuously tame matching wild pets
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
-    hopDelay        = 5,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
+    hopDelay        = 5,       -- seconds to keep watching for respawns after a tame before hopping (5-30)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
     emptyHopGrace   = 0.4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
@@ -1025,20 +1025,49 @@ local function doTeleport(pid, job)
     end
 end
 
-local function hopTo(pid, job)
-    markVisited(job)
+local function buildJobList()
+    local jobs, seen = {}, {}
+    local function add(j)
+        j = tostring(j or "")
+        if j ~= "" and not seen[normJob(j)] then
+            seen[normJob(j)] = true
+            jobs[#jobs + 1] = j
+        end
+    end
+
+    local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
+    if st.useFinder and not usePublic then
+        for _ = 1, 5 do
+            local j = finderPickJobId()
+            if j then add(j) end
+        end
+    end
+
+    local servers = fetchHopServers(false)
+    if #servers == 0 then servers = fetchHopServers(true) end
+    for i = 1, math.min(#servers, 15) do add(servers[i].id) end
+
+    return jobs
+end
+
+local function hopTo(pid, jobs)
+    if #jobs == 0 then return end
+    for _, j in ipairs(jobs) do markVisited(j) end
+
     if not st.kickBeforeHop then
-        doTeleport(pid, job)
+        doTeleport(pid, jobs[1])
         return
     end
+
     local delaySec = math.max(1, tonumber(st.kickRejoinDelay) or 10)
-    notify(("Kicking now, rejoin in %ds -> %s"):format(delaySec, tostring(job)))
+    notify(("Kicking now, rejoin in %ds (%d candidate servers)"):format(delaySec, #jobs))
     _G.__WISHUB_INTENTIONAL_KICK = true
     task.spawn(function()
         task.wait(delaySec)
         local gap = math.max(0.05, tonumber(st.kickRetryDelay) or 1.2)
         local tries = math.max(1, math.floor(tonumber(st.kickRetryCount) or 20))
-        for _ = 1, tries do
+        for i = 1, tries do
+            local job = jobs[((i - 1) % #jobs) + 1]
             dismissTeleportError()
             doTeleport(pid, job)
             task.wait(gap)
@@ -1060,24 +1089,13 @@ local function serverHop()
         teleportFailed = false
         teleportFailResult = nil
 
-        local usePublic = math.random() < (tonumber(st.finderPublicMix) or 0)
-        local usedJob = (st.useFinder and not usePublic) and finderPickJobId() or nil
-        if usedJob then
-            hopTo(pid, usedJob)
-        else
-            local servers = fetchHopServers(false)
-            if #servers == 0 and attempt >= 3 then servers = fetchHopServers(true) end
-            if #servers > 0 then
-                local pickMax = math.min(#servers, 10)
-                local choice = servers[math.random(1, pickMax)]
-                usedJob = choice.id
-                hopTo(pid, usedJob)
-            else
-                notify(("No fresh server found, retrying (#%d)"):format(attempt))
-                task.wait(5)
-                continue
-            end
+        local jobs = buildJobList()
+        if #jobs == 0 then
+            notify(("No fresh server found, retrying (#%d)"):format(attempt))
+            task.wait(5)
+            continue
         end
+        hopTo(pid, jobs)
         local t0 = os.clock()
         while not teleportFailed and os.clock() - t0 < 60 do
             if not (st.autoTame and st.autoHop) then return false end
@@ -1085,9 +1103,9 @@ local function serverHop()
         end
         if teleportFailed then
             local flooded = teleportFailResult == Enum.TeleportResult.Flooded
-            if usedJob then
-                local unauth = teleportFailResult == Enum.TeleportResult.Unauthorized
-                finderFailedJobs[usedJob] = os.clock() + (unauth and 36000 or 45)
+            local unauth = teleportFailResult == Enum.TeleportResult.Unauthorized
+            for _, j in ipairs(jobs) do
+                finderFailedJobs[j] = os.clock() + (unauth and 36000 or 45)
             end
             notify(flooded and ("Rate-limited, waiting (#%d)"):format(attempt)
                 or ("Server full/failed, retrying (#%d)"):format(attempt))
@@ -1145,15 +1163,25 @@ task.spawn(function()
                         for p in pairs(firedPrompts) do firedPrompts[p] = nil end
 
                         if sessionTamed > 0 then
-                            reportDone()
                             local hd = math.clamp(tonumber(st.hopDelay) or 5, 5, 30)
                             local jitter = math.max(0, tonumber(st.hopJitter) or 0)
                             if jitter > 0 then hd = hd + math.random() * jitter end
-                            notify(("Tamed %d, hopping in %.0fs"):format(sessionTamed, hd))
+                            notify(("Tamed %d, watching for respawns for %.0fs"):format(sessionTamed, hd))
+
                             local hstart = os.clock()
-                            while os.clock() - hstart < hd and st.autoTame and st.autoHop do
-                                task.wait(0.2)
+                            local hardStop = os.clock() + hd * 3
+                            while os.clock() - hstart < hd
+                                and os.clock() < hardStop
+                                and st.autoTame and st.autoHop do
+                                local t2, r2 = pickTarget()
+                                if t2 then
+                                    doTameStep(t2, r2)
+                                    hstart = os.clock()
+                                else
+                                    task.wait(0.3)
+                                end
                             end
+                            reportDone()
                         else
                             notify("No pet here -- hopping now")
                         end
@@ -1212,15 +1240,28 @@ local function fpsKeepSet()
     return keep
 end
 
+local function isPetRelated(inst)
+    if not inst then return false end
+    if tostring(inst.Name):find("WildPet", 1, true) then return true end
+    local ok, found = pcall(function()
+        return inst:FindFirstChild("WildPetSpawns", true)
+            or inst:FindFirstChild("WildPetRef", true)
+    end)
+    if ok and found then return true end
+    return false
+end
+
 local function fpsClearWorld()
     local keep = fpsKeepSet()
     for _, c in ipairs(workspace:GetChildren()) do
-        if keep[c] or c:IsA("Camera") then
+        if keep[c] or c:IsA("Camera") or isPetRelated(c) then
         elseif c:IsA("Terrain") then
             pcall(function() c:Clear() end)
         elseif c.Name == "Map" or c.Name == "Baseplate" then
             for _, mc in ipairs(c:GetChildren()) do
-                if not keep[mc] then pcall(function() mc:Destroy() end) end
+                if not keep[mc] and not isPetRelated(mc) then
+                    pcall(function() mc:Destroy() end)
+                end
             end
         elseif c:IsA("BasePart") or c:IsA("Model") or c:IsA("Folder") or c:IsA("UnionOperation") or c:IsA("MeshPart") then
             pcall(function() c:Destroy() end)
@@ -1271,18 +1312,7 @@ local function fpsClearFruitTrees()
     local gardens = workspace:FindFirstChild("Gardens")
     if not gardens then return end
     for _, plot in ipairs(gardens:GetChildren()) do
-        local plants = plot:FindFirstChild("Plants")
-        if plants then
-            for _, plant in ipairs(plants:GetChildren()) do
-                pcall(function() plant:Destroy() end)
-            end
-        end
-        local fruits = plot:FindFirstChild("Fruits")
-        if fruits then
-            for _, f in ipairs(fruits:GetChildren()) do
-                pcall(function() f:Destroy() end)
-            end
-        end
+        pcall(function() plot:Destroy() end)
     end
 end
 
@@ -1303,6 +1333,19 @@ local function fpsProtected(desc)
     if fpsPlatform and (desc == fpsPlatform or desc:IsDescendantOf(fpsPlatform)) then return true end
     local char = LocalPlayer.Character
     if char and desc:IsDescendantOf(char) then return true end
+
+    if tostring(desc.Name):find("WildPet", 1, true) then return true end
+    local okA, anc = pcall(function()
+        return desc:FindFirstAncestor("WildPetSpawns") or desc:FindFirstAncestor("WildPetRef")
+    end)
+    if okA and anc then return true end
+    local cur = desc.Parent
+    for _ = 1, 6 do
+        if not cur or cur == workspace then break end
+        if tostring(cur.Name):find("WildPet", 1, true) then return true end
+        cur = cur.Parent
+    end
+
     local m = workspace:FindFirstChild("Map")
     if m then
         local sp = m:FindFirstChild("WildPetSpawns")
