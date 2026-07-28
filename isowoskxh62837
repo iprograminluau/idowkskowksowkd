@@ -1120,14 +1120,14 @@ local function serverHop()
         local jobs = buildJobList()
         if #jobs == 0 then
             notify(("No fresh server found, retrying (#%d)"):format(attempt))
-            task.wait(5)
+            task.wait(1)
             continue
         end
         hopTo(pid, jobs)
         local t0 = os.clock()
         while not teleportFailed and os.clock() - t0 < 60 do
             if not (st.autoTame and st.autoHop) then return false end
-            task.wait(0.5)
+            task.wait(0.1)
         end
         if teleportFailed then
             local flooded = teleportFailResult == Enum.TeleportResult.Flooded
