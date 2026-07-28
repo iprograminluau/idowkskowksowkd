@@ -8,19 +8,21 @@ local CONFIG = {
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
     hopDelay        = 5,       -- seconds to keep watching for respawns after a tame before hopping (5-30)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
-    emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    emptyHopGrace   = 0.4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
-    finderPublicMix = 0.1,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderPublicMix = 0.2,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Rare",
-    finderCandidates = 100,      -- how many hop targets to take from the pet finder
-    publicCandidates = 2,       -- how many hop targets to take from the public server list
+    finderRandomRarity = true,  -- pick ONE random rarity per fetch so every bot spreads to different servers
+    finderFreshTop  = 50,       -- keep only the N freshest finder entries before picking
+    finderCandidates = 10,      -- how many hop targets to take from the pet finder
+    publicCandidates = 3,       -- how many hop targets to take from the public server list
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
     tameMoveSpeed   = 30,      -- how fast you walk to each pet (16 = normal ... 50 = max)
     tameSettleTime  = 0.1,       -- seconds to stand still after arriving before the first tame fire (lets the server register our position; 0 = fire ASAP)
-    tameReturnAfter = false,    -- (no effect while protectWildTame is false)
+    tameReturnAfter = true,    -- (no effect while protectWildTame is false)
     maxPetPrice     = 20000000,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
     protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
 
@@ -44,7 +46,7 @@ local CONFIG = {
     rejoinOnError   = 0.1,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
     kickBeforeHop   = true, -- kick yourself first, then teleport from the executor thread (VM survives the kick)
     kickRejoinDelay = 5,   -- seconds between the kick and the teleport fire
-    kickRetryDelay  = 0.01,  -- seconds between teleport retries after the kick (too low = Roblox rate limit)
+    kickRetryDelay  = 0.1,  -- seconds between teleport retries after the kick (too low = Roblox rate limit)
     kickRetryCount  = 200,  -- how many teleport retries before giving up and letting autoRejoin take over
     skipLoading = true,    -- spam a centre click every 2s from the moment the script runs
     fpsBoost    = true,    -- strip the world for max FPS (everything returns on rejoin)
@@ -118,7 +120,37 @@ do
         reconnecting = false
     end
 
+    local function errorText()
+        local msg = ""
+        pcall(function()
+            msg = tostring(game:GetService("GuiService"):GetErrorMessage() or "")
+        end)
+        if msg == "" then
+            pcall(function()
+                local rg = game:GetService("CoreGui"):FindFirstChild("RobloxGui")
+                local prompt = rg and rg:FindFirstChild("ErrorPrompt", true)
+                if prompt then
+                    for _, d in ipairs(prompt:GetDescendants()) do
+                        if d:IsA("TextLabel") and #tostring(d.Text) > #msg then
+                            msg = tostring(d.Text)
+                        end
+                    end
+                end
+            end)
+        end
+        return string.lower(msg)
+    end
+
     game:GetService("GuiService").ErrorMessageChanged:Connect(function()
+        local msg = errorText()
+        local dataKick = msg:find("save data", 1, true)
+            or msg:find("uh oh", 1, true)
+            or msg:find("didn't load", 1, true)
+            or msg:find("did not load", 1, true)
+        if dataKick then
+            _G.__WISHUB_INTENTIONAL_KICK = false
+            notify("Save-data kick detected - rejoining now")
+        end
         task.spawn(reconnect)
     end)
 end
@@ -899,22 +931,44 @@ local function finderRequestFn()
 end
 
 local function finderPetNames()
+    local pool = {}
     local want = st.finderRarities
-    local restrict = type(want) == "table" and #want > 0
+    if type(want) == "table" and #want > 0 then
+        for _, r in ipairs(want) do pool[#pool + 1] = r end
+    else
+        local seen = {}
+        for _, rarity in pairs(PetRarityByName) do
+            if not seen[rarity] then
+                seen[rarity] = true
+                pool[#pool + 1] = rarity
+            end
+        end
+    end
+
+    if st.finderRandomRarity and #pool > 0 then
+        local pick = pool[math.random(1, #pool)]
+        local names = {}
+        for name, rarity in pairs(PetRarityByName) do
+            if rarity == pick then names[#names + 1] = name end
+        end
+        if #names > 0 then return names, pick end
+    end
+
+    local restrict = #pool > 0 and type(want) == "table" and #want > 0
     local names = {}
     for name, rarity in pairs(PetRarityByName) do
         if not restrict or table.find(want, rarity) then
             names[#names + 1] = name
         end
     end
-    return names
+    return names, nil
 end
 
 local function finderFetch()
     if not st.useFinder then return nil end
     local req = finderRequestFn()
     if type(req) ~= "function" then return nil end
-    local names = finderPetNames()
+    local names, pickedRarity = finderPetNames()
     if #names == 0 then return nil end
     local url = FINDER_BASE .. "?pet_name=" .. table.concat(names, ",")
     local resp
@@ -925,6 +979,7 @@ local function finderFetch()
             Headers = {
                 ["Authorization"] = "Bearer " .. tostring(st.finderToken or ""),
                 ["Cache-Control"] = "no-store",
+                ["Pragma"] = "no-cache",
             },
         })
     end)
@@ -933,68 +988,64 @@ local function finderFetch()
     if type(body) ~= "string" then return nil end
     local decoded
     if not pcall(function() decoded = HttpService:JSONDecode(body) end) then return nil end
-    return type(decoded) == "table" and decoded or nil
+    if type(decoded) ~= "table" then return nil end
+    return decoded, pickedRarity
 end
 
 local function finderPickJobs(count)
     count = math.max(1, math.floor(tonumber(count) or 1))
-    local pets = finderFetch()
+    local pets, pickedRarity = finderFetch()
     if not pets then return {} end
     local cur = normJob(game.JobId)
     local now = os.time()
     local clock = os.clock()
+
     local best = {}
     for _, p in ipairs(pets) do
         local job = tostring(p.job_id or "")
         local remain = (tonumber(p.expires_at) and (p.expires_at - now)) or tonumber(p.remaining) or 0
         local players = tonumber(p.players) or 0
         local maxp = tonumber(p.max_players) or 8
-        local pname = tostring(p.pet_name or p.name or "")
-        local rarity = tostring(p.rarity or PetRarityByName[pname] or "")
-        local rank = RARITY_RANK[rarity] or 0
         local failed = finderFailedJobs[job]
         if job ~= "" and normJob(job) ~= cur and remain >= FINDER_MIN_REMAINING and players < maxp
             and not (failed and failed > clock) then
             local prev = best[job]
-            if not prev then
-                best[job] = { players = players, remain = remain, rank = rank }
-            else
-                if rank > prev.rank then prev.rank = rank end
-                if remain > prev.remain then prev.remain = remain end
+            if not prev or remain > prev.remain then
+                best[job] = { players = players, remain = remain }
             end
         end
     end
 
-    local minRank = finderMinRank()
-    local list, total = {}, 0
-    local function build(floor, allowRecent)
-        list, total = {}, 0
+    local function collect(allowRecent)
+        local arr = {}
         for job, info in pairs(best) do
-            if (info.rank or 0) >= floor and (allowRecent or not wasRecent(job)) then
-                local w = math.max(1, 8 - (info.players or 0)) * (2 ^ math.max(0, (info.rank or 1) - 1))
-                list[#list + 1] = { job = job, w = w }
-                total = total + w
+            if allowRecent or not wasRecent(job) then
+                arr[#arr + 1] = { job = job, remain = info.remain, players = info.players }
             end
         end
+        return arr
     end
 
-    build(minRank, false)
-    if #list == 0 and minRank > 0 then build(0, false) end
-    if #list == 0 then build(minRank, true) end
-    if #list == 0 then build(0, true) end
-    if #list == 0 then return {} end
+    local arr = collect(false)
+    if #arr == 0 then arr = collect(true) end
+    if #arr == 0 then return {} end
+
+    table.sort(arr, function(a, b) return a.remain > b.remain end)
+
+    local topN = math.max(1, math.floor(tonumber(st.finderFreshTop) or 50))
+    if #arr > topN then
+        for i = #arr, topN + 1, -1 do arr[i] = nil end
+    end
+
+    for i = #arr, 2, -1 do
+        local j = math.random(1, i)
+        arr[i], arr[j] = arr[j], arr[i]
+    end
 
     local out = {}
-    while #out < count and #list > 0 and total > 0 do
-        local r = math.random() * total
-        local acc, idx = 0, #list
-        for i, c in ipairs(list) do
-            acc = acc + c.w
-            if r <= acc then idx = i break end
-        end
-        out[#out + 1] = list[idx].job
-        total = total - list[idx].w
-        table.remove(list, idx)
+    for i = 1, math.min(count, #arr) do out[#out + 1] = arr[i].job end
+    if pickedRarity then
+        notify(("Finder: %s -> %d fresh servers"):format(pickedRarity, #out))
     end
     return out
 end
@@ -1120,14 +1171,14 @@ local function serverHop()
         local jobs = buildJobList()
         if #jobs == 0 then
             notify(("No fresh server found, retrying (#%d)"):format(attempt))
-            task.wait(1)
+            task.wait(2)
             continue
         end
         hopTo(pid, jobs)
         local t0 = os.clock()
-        while not teleportFailed and os.clock() - t0 < 60 do
+        while not teleportFailed and os.clock() - t0 < 25 do
             if not (st.autoTame and st.autoHop) then return false end
-            task.wait(0.1)
+            task.wait(0.5)
         end
         if teleportFailed then
             local flooded = teleportFailResult == Enum.TeleportResult.Flooded
@@ -1139,7 +1190,7 @@ local function serverHop()
                 or ("Server full/failed, retrying (#%d)"):format(attempt))
             if flooded then task.wait(12) else task.wait() end
         else
-            notify(("Teleport stuck 1m, retrying (#%d)"):format(attempt))
+            notify(("Teleport stuck, retrying (#%d)"):format(attempt))
             task.wait(1)
         end
     end
