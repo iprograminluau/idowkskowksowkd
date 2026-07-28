@@ -16,7 +16,7 @@ local CONFIG = {
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
     tameNames       = {},      -- only these species, e.g. {"Raccoon","Dragonfly"}.          {} = any
-    tameMoveSpeed   = 8,      -- how fast you walk to each pet (16 = normal ... 50 = max)
+    tameMoveSpeed   = 60,      -- how fast you walk to each pet (16 = normal ... 50 = max)
     tameTimeout     = 10,      -- give up on a pet after this many seconds of failed tame attempts
     tameMaxFails    = 2,       -- after this many timeouts on the same pet, blacklist it for this server
     tameReturnAfter = true,    -- (no effect while protectWildTame is false)
