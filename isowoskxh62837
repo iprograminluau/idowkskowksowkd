@@ -8,12 +8,12 @@ local CONFIG = {
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
     hopDelay        = 5,       -- seconds to keep watching for respawns after a tame before hopping (5-30)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
-    emptyHopGrace   = 0.4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
-    finderPublicMix = 0,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
+    finderPublicMix = 0.1,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Common",
     finderCandidates = 100,      -- how many hop targets to take from the pet finder
-    publicCandidates = 0,       -- how many hop targets to take from the public server list
+    publicCandidates = 2,       -- how many hop targets to take from the public server list
     finderRarities  = {},       -- which rarities to chase via the finder. {} = all. e.g. {"Legendary","Mythic","Super"}
     finderToken     = "6d35e00d087f9b53de54381a82a5e5c52e9c93088bf0bde9",  -- pet-finder read token (Bearer)
     tameRarities    = {},      -- only these rarities, e.g. {"Legendary","Mythic","Super"}.  {} = any
@@ -43,7 +43,7 @@ local CONFIG = {
     charLoadTimeout = 10,  -- avatar never appears (no char/analog stick)? rejoin after this many seconds (0 = off)
     rejoinOnError   = 0.1,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
     kickBeforeHop   = true, -- kick yourself first, then teleport from the executor thread (VM survives the kick)
-    kickRejoinDelay = 10,   -- seconds between the kick and the teleport fire
+    kickRejoinDelay = 8,   -- seconds between the kick and the teleport fire
     kickRetryDelay  = 0.1,  -- seconds between teleport retries after the kick (too low = Roblox rate limit)
     kickRetryCount  = 200,  -- how many teleport retries before giving up and letting autoRejoin take over
     skipLoading = true,    -- spam a centre click every 2s from the moment the script runs
