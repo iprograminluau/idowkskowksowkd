@@ -8,7 +8,7 @@ local CONFIG = {
     autoHop         = true,   -- true = clear this server, then hop to a new one for more
     hopDelay        = 5,       -- seconds to wait AFTER a successful tame before hopping (5-30, catches respawns)
     hopJitter       = 8,        -- + 0..N random extra seconds per hop so the fleet desyncs (0 = off)
-    emptyHopGrace   = 4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
+    emptyHopGrace   = 0.4,        -- seconds to wait for a pet on join; no pet within this = hop INSTANTLY (no delay)
     useFinder       = true,     -- hop STRAIGHT to a server that already has a wanted pet (WisHUB pet finder)
     finderPublicMix = 0.4,      -- fraction of hops that skip the finder and do a plain public random hop (0..1)
     finderMinRarity = "Rare",
@@ -42,7 +42,9 @@ local CONFIG = {
     rejoinOnError   = 3,    -- after this many back-to-back tame-loop errors, instant-rejoin to unstick (0 = off)
     kickBeforeHop   = true, -- kick yourself first, then teleport from the executor thread (VM survives the kick)
     kickRejoinDelay = 10,   -- seconds between the kick and the teleport fire
-    skipLoading = true,    -- auto-skip the loading screen once it is fully loaded
+    kickRetryDelay  = 0.1,  -- seconds between teleport retries after the kick (too low = Roblox rate limit)
+    kickRetryCount  = 200,  -- how many teleport retries before giving up and letting autoRejoin take over
+    skipLoading = true,    -- spam a centre click every 2s from the moment the script runs
     fpsBoost    = true,    -- strip the world for max FPS (everything returns on rejoin)
 
     ------------------------------------------------------------------ DISCORD WEBHOOK
@@ -1034,10 +1036,12 @@ local function hopTo(pid, job)
     _G.__WISHUB_INTENTIONAL_KICK = true
     task.spawn(function()
         task.wait(delaySec)
-        for _ = 1, 20 do
+        local gap = math.max(0.05, tonumber(st.kickRetryDelay) or 1.2)
+        local tries = math.max(1, math.floor(tonumber(st.kickRetryCount) or 20))
+        for _ = 1, tries do
             dismissTeleportError()
             doTeleport(pid, job)
-            task.wait(1.2)
+            task.wait(gap)
         end
         _G.__WISHUB_INTENTIONAL_KICK = false
     end)
@@ -1263,22 +1267,20 @@ local function fpsSafeToStart()
     return hrp() ~= nil
 end
 
-local function fpsClearGardens()
+local function fpsClearFruitTrees()
     local gardens = workspace:FindFirstChild("Gardens")
     if not gardens then return end
-    local pid = LocalPlayer:GetAttribute("PlotId")
-    local myPlot = pid and ("Plot" .. tostring(pid)) or nil
     for _, plot in ipairs(gardens:GetChildren()) do
-        if string.match(plot.Name, "^Plot%d+$") then
-            if myPlot and plot.Name ~= myPlot then
-                pcall(function() plot:Destroy() end)
-            else
-                local plants = plot:FindFirstChild("Plants")
-                if plants then
-                    for _, plant in ipairs(plants:GetChildren()) do
-                        pcall(function() plant:Destroy() end)
-                    end
-                end
+        local plants = plot:FindFirstChild("Plants")
+        if plants then
+            for _, plant in ipairs(plants:GetChildren()) do
+                pcall(function() plant:Destroy() end)
+            end
+        end
+        local fruits = plot:FindFirstChild("Fruits")
+        if fruits then
+            for _, f in ipairs(fruits:GetChildren()) do
+                pcall(function() f:Destroy() end)
             end
         end
     end
@@ -1420,14 +1422,18 @@ local function startFpsBoost()
     fpsLoopId = fpsLoopId + 1
     local id = fpsLoopId
     task.spawn(function()
+        while st.fpsBoost and fpsLoopId == id and not fpsSafeToStart() do
+            pcall(fpsClearFruitTrees)
+            task.wait(1)
+        end
+        if not (st.fpsBoost and fpsLoopId == id) then return end
         fpsGameplayActive = true
-        pcall(fpsClearGardens)
         ensureFpsPlatform()
         pcall(fpsClearWorld)
         pcall(optimizeWorld)
         while st.fpsBoost and fpsLoopId == id do
             task.wait(2)
-            pcall(fpsClearGardens)
+            pcall(fpsClearFruitTrees)
             pcall(fpsClearWorld)
         end
         fpsGameplayActive = false
