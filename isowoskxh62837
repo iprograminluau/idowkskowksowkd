@@ -20,7 +20,7 @@ local CONFIG = {
     tameTimeout     = 10,      -- give up on a pet after this many seconds of failed tame attempts
     tameMaxFails    = 2,       -- after this many timeouts on the same pet, blacklist it for this server
     tameReturnAfter = true,    -- (no effect while protectWildTame is false)
-    maxPetPrice     = 0,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
+    maxPetPrice     = 20000000,       -- skip pets costing more than this (0 = no limit). Number, e.g. 15e6
     protectWildTame = false,   -- hold the shovel + knock back nearby players while taming
 
     ------------------------------------------------------------------ AUTO SELL PET
